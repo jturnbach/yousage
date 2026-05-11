@@ -134,10 +134,23 @@ struct PopoverView: View {
                 .lineLimit(1)
             Spacer()
             Menu {
-                Button("Settings…") { openSettings() }
                 Button("Refresh") { state.refresh() }
                     .disabled(!state.isConfigured)
+                Menu("Displayed Usage") {
+                    ForEach(MenuBarMetric.allCases) { metric in
+                        Button {
+                            state.setMenuBarMetric(metric)
+                        } label: {
+                            if state.menuBarMetric == metric {
+                                Label(metric.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(metric.displayName)
+                            }
+                        }
+                    }
+                }
                 Divider()
+                Button("Settings…") { openSettings() }
                 Button("Open claude.ai/settings/usage") {
                     if let url = URL(string: "https://claude.ai/settings/usage") {
                         NSWorkspace.shared.open(url)
@@ -176,9 +189,7 @@ struct SectionRow: View {
                     Text(section.title)
                         .font(.system(size: 13, weight: .regular))
                     if let note = section.infoNote {
-                        Image(systemName: "info.circle")
-                            .foregroundStyle(.tertiary)
-                            .help(note)
+                        InfoTip(text: note)
                     }
                 }
                 if let s = resetString {
@@ -214,6 +225,29 @@ struct SectionRow: View {
             let f = DateFormatter()
             f.dateFormat = "EEE h:mm a"
             return "Resets \(f.string(from: date))"
+        }
+    }
+}
+
+private struct InfoTip: View {
+    let text: String
+    @State private var showing = false
+
+    var body: some View {
+        Button {
+            showing.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.tertiary)
+        }
+        .buttonStyle(.plain)
+        .help(text)
+        .popover(isPresented: $showing, arrowEdge: .top) {
+            Text(text)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(12)
+                .frame(maxWidth: 260)
         }
     }
 }

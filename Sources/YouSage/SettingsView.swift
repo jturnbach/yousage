@@ -20,8 +20,6 @@ struct SettingsView: View {
 
                 connectionSection
                 Divider()
-                displaySection
-                Divider()
                 instructions
                 Divider()
                 debugSection
@@ -105,28 +103,6 @@ struct SettingsView: View {
                 testStatus = "Failed: \(error.localizedDescription)"
             }
             testing = false
-        }
-    }
-
-    // MARK: - Display
-
-    private var displaySection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Menu Bar Display")
-                .font(.headline)
-            Text("Which percentage to show next to the menu bar icon.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Picker("Show", selection: Binding(
-                get: { state.menuBarMetric },
-                set: { state.setMenuBarMetric($0) }
-            )) {
-                ForEach(MenuBarMetric.allCases) { metric in
-                    Text(metric.displayName).tag(metric)
-                }
-            }
-            .pickerStyle(.radioGroup)
-            .labelsHidden()
         }
     }
 

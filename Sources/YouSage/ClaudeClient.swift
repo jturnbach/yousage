@@ -112,7 +112,7 @@ final class ClaudeClient: @unchecked Sendable {
             .init(key: "seven_day",          title: "All models",            kind: .weekly,  infoNote: nil),
             .init(key: "seven_day_sonnet",   title: "Sonnet only",           kind: .weekly,  infoNote: nil),
             .init(key: "seven_day_opus",     title: "Claude Design",         kind: .weekly,  infoNote: "Opus / Claude Design weekly limit"),
-            .init(key: "seven_day_oauth_apps", title: "OAuth apps",          kind: .weekly,  infoNote: "Claude Code & other OAuth-connected apps"),
+            .init(key: "seven_day_oauth_apps", title: "OAuth apps",          kind: .weekly,  infoNote: "Third-party apps you've authorized via Sign-In-With-Claude. Claude Code counts toward All models, not this bucket."),
         ]
 
         var out: [UsageSection] = []

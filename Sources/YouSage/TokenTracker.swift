@@ -105,6 +105,17 @@ actor TokenTracker {
         )
     }
 
+    /// Seven calendar days of usage for the details window. Deliberately a
+    /// different window from `report`'s rolling week: a bar labelled "Fri" must
+    /// be Friday, so the two totals will not agree, and each is labelled with
+    /// the window it describes.
+    func breakdown(now: Date = Date(), calendar: Calendar = .current) -> UsageBreakdown? {
+        guard isAvailable else { return nil }
+        scan()
+        let usage = events.map { UsageEvent(date: $0.date, model: $0.model, totals: $0.totals) }
+        return UsageBreakdown.make(from: usage, now: now, calendar: calendar)
+    }
+
     private func modelSplit(_ events: [Event]) -> [ModelTokens] {
         var byModel: [String: TokenTotals] = [:]
         for e in events {

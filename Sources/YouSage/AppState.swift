@@ -18,6 +18,7 @@ final class AppState: ObservableObject {
     @Published private(set) var planMode: PlanMode = .auto
     @Published private(set) var tokenTrackingEnabled: Bool = true
     @Published private(set) var tokenReport: TokenReport?
+    @Published private(set) var usageBreakdown: UsageBreakdown?
     /// Raw status + body of the most recent failed /usage attempt, surfaced in
     /// the Settings → Debug panel to diagnose plan-specific endpoint issues.
     @Published private(set) var lastErrorDetail: String?
@@ -242,9 +243,13 @@ final class AppState: ObservableObject {
         let week = snapshot?.weeklyAllSection?.resetsAt
         tokenScan = Task { [weak self] in
             let report = await TokenTracker.shared.report(sessionResetsAt: session, weekResetsAt: week)
+            // Same in-memory events, a different window. The second call re-enters
+            // `scan()`, which is incremental and finds nothing new to read.
+            let breakdown = await TokenTracker.shared.breakdown()
             await MainActor.run {
                 guard let self else { return }
                 self.tokenReport = report
+                self.usageBreakdown = breakdown
                 self.lastTokenScan = Date()
                 self.tokenScan = nil
             }

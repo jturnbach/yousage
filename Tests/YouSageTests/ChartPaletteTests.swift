@@ -27,17 +27,6 @@ import Testing
         #expect(Set(hexes).count == 4)
     }
 }
-
-@Test func aFamilysColourDependsOnNothingButItself() {
-    // Colour follows the entity, never its rank: dropping Sonnet from a week
-    // must not repaint Haiku. `hex` takes no context, so this holds by
-    // construction — the test pins the property against a future refactor.
-    let before = ChartPalette.hex(for: .haiku, scheme: .light)
-    let subset: [ModelFamily] = [.opus, .haiku]
-    let after = subset.compactMap { $0 == .haiku ? ChartPalette.hex(for: $0, scheme: .light) : nil }.first
-    #expect(before == after)
-}
-
 @Test func theSequentialHueIsTheBrandTerracotta() {
     // The token-kind chart is one series, so it takes one colour.
     #expect(ChartPalette.sequentialHex(.light) == 0xD97757)

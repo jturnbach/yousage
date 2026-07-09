@@ -1,5 +1,12 @@
 # Cost Estimate + App Icon Implementation Plan
 
+> **Amended during execution.** Task 1's code block below shows the family
+> fallback as `normalized.contains($0.name)`. Review found this mispriced legacy
+> ids (`claude-3-opus` → current Opus rate) and it was replaced by an
+> `isFamily(_:of:)` helper anchored on both edges; `normalize` also gained an
+> `anthropic.` provider-prefix strip. The shipped code in
+> `Sources/YouSage/Pricing.swift` is authoritative. See the corrected spec.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Show what YouSage's tracked tokens would cost at Anthropic's per-token API list prices, and give the app a bundle icon.

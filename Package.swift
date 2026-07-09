@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "YouSage",
             path: "Sources/YouSage"
+        ),
+        .testTarget(
+            name: "YouSageTests",
+            dependencies: ["YouSage"],
+            path: "Tests/YouSageTests"
         )
     ],
     swiftLanguageModes: [.v5]

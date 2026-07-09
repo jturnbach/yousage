@@ -74,10 +74,14 @@ enum Pricing {
 Lookup order, each step falling through to the next:
 
 1. Exact match against the table.
-2. Normalize, then match again — strip a trailing 8-digit date stamp
-   (`-20251001`) and any bracketed suffix (`[1m]`), both of which appear in real
-   transcripts.
-3. Family match on the first recognized family word in the ID.
+2. Normalize, then match again — strip a leading provider prefix
+   (`anthropic.`), any bracketed suffix (`[1m]`), and a trailing 8-digit date
+   stamp (`-20251001`). All three appear in real transcripts; `ModelTokens
+   .displayName` already strips the same provider prefix.
+3. Family match, anchored on both edges: the family word must sit immediately
+   after `claude-` and end at a hyphen or the end of the id. So `claude-opus-9-0`
+   matches, while `claude-3-opus` (a past generation that priced differently)
+   and `claude-opusglobular` (not a model) do not.
 4. No match: return `nil`.
 
 ### Where the arithmetic lives
@@ -152,10 +156,21 @@ Each is a deliberate simplification, not an oversight:
   rate through 2026-08-31, after which it returns to \$3/\$15. The table uses
   the standard \$3/\$15 rather than encoding a date-dependent rate for a
   promotion that expires within weeks. Slight overestimate until then.
-- **Legacy models.** Opus 4.1 and earlier, and Haiku 3.x, had list prices
-  differing from their current family. They resolve through the family fallback
-  and are therefore approximate. They are also vanishingly rare in Claude Code
-  transcripts.
+- **Legacy generations report as unpriced, not approximated.** Opus 4.1 and
+  earlier, and Haiku 3.x, listed at prices differing from their current family —
+  Claude 3 Opus at \$15/\$75 against today's \$5/\$25. Because the family match is
+  anchored, `claude-3-opus` does not match `opus`; it returns `nil` and the
+  window renders as `≥ $x`. Reporting a gap beats reporting a number that is
+  three times wrong. (They cannot appear regardless: the retention window is
+  eight days and those models retired months ago.)
+- **Future point releases are approximated silently.** `claude-opus-9-0` matches
+  the `opus` family and prices at \$5/\$25 with no `≥` marker. If Anthropic
+  changes a family's rate, the estimate is quietly wrong until the table is
+  updated. This is the deliberate price of the fallback: an unknown *family*
+  surfaces as a gap, an unknown *version within a known family* does not.
+- **Region-prefixed Bedrock ids** (`us.anthropic.claude-…`) are unpriced. Only
+  the bare `anthropic.` prefix is stripped, matching the existing scope of
+  `ModelTokens.displayName`.
 - **Long-context premiums** are not modeled.
 
 None of these change the number's purpose, which is order-of-magnitude

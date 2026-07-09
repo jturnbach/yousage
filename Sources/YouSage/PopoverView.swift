@@ -237,6 +237,10 @@ struct TokenTrackerView: View {
     Tokens counted from Claude Code transcripts stored on this Mac \
     (~/.claude/projects). Chats in the Claude app, on claude.ai, or on another \
     computer draw down the same limits but aren't counted here.
+
+    Dollar amounts are what these tokens would cost at Anthropic's standard \
+    API list prices. You're on a subscription and are not billed for them. \
+    Cache writes are priced at 1.25× the input rate, cache reads at 0.1×.
     """
 
     var body: some View {
@@ -250,11 +254,13 @@ struct TokenTrackerView: View {
 
             row(title: "Current session",
                 subtitle: sessionSubtitle,
-                totals: report.session)
+                totals: report.session,
+                cost: report.sessionCost)
 
             row(title: "Last 7 days",
                 subtitle: nil,
-                totals: report.week)
+                totals: report.week,
+                cost: report.weekCost)
 
             if report.models.count > 1 {
                 Text(report.models.prefix(3)
@@ -275,7 +281,7 @@ struct TokenTrackerView: View {
         return report.sessionIsAuthoritative ? since : "\(since) (estimated window)"
     }
 
-    private func row(title: String, subtitle: String?, totals: TokenTotals) -> some View {
+    private func row(title: String, subtitle: String?, totals: TokenTotals, cost: CostEstimate) -> some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -288,9 +294,20 @@ struct TokenTrackerView: View {
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 2) {
-                Text(NumberFormat.tokens(totals.total))
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                    .monospacedDigit()
+                HStack(spacing: 4) {
+                    Text(NumberFormat.tokens(totals.total))
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                    Text("·")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.tertiary)
+                    // Secondary, not the headline: the count is the fact, the
+                    // dollar figure is the annotation.
+                    Text(cost.display)
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
                 Text(totals.breakdown)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)

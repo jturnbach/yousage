@@ -65,15 +65,21 @@ struct UsageWindow: View {
                 if showTable {
                     UsageTable(breakdown: breakdown)
                 } else {
-                    GroupBox("Tokens per day") {
-                        TrendChart(days: breakdown.days).padding(.top, 6)
-                    }
-                    HStack(alignment: .top, spacing: 16) {
-                        GroupBox("Cost by model") {
-                            CostByModelChart(models: breakdown.models).padding(.top, 6)
-                        }
-                        GroupBox("Token kind") {
-                            TokenKindChart(kinds: breakdown.kinds).padding(.top, 6)
+                    // One container, so the three panes blend at their edges
+                    // instead of stacking as separate sheets.
+                    GlassGroup(spacing: 16) {
+                        VStack(spacing: 16) {
+                            GlassCard(title: "Tokens per day") {
+                                TrendChart(days: breakdown.days)
+                            }
+                            HStack(alignment: .top, spacing: 16) {
+                                GlassCard(title: "Cost by model") {
+                                    CostByModelChart(models: breakdown.models)
+                                }
+                                GlassCard(title: "Token kind") {
+                                    TokenKindChart(kinds: breakdown.kinds)
+                                }
+                            }
                         }
                     }
                 }
@@ -95,7 +101,9 @@ struct UsageWindow: View {
             HStack(alignment: .firstTextBaseline) {
                 kpi(NumberFormat.tokens(breakdown.totals.total), "tokens")
                 kpi(breakdown.cost.display, "at API list prices")
-                kpi("\(breakdown.totals.messages)", "messages")
+                // Grouped, not compacted: message counts are human-scale, and
+                // "1.9K messages" throws away a digit nobody asked us to hide.
+                kpi(breakdown.totals.messages.formatted(.number), "messages")
                 Spacer()
                 Picker("", selection: $showTable) {
                     Image(systemName: "chart.bar.xaxis").tag(false)
@@ -129,8 +137,9 @@ private struct UsageTable: View {
     let breakdown: UsageBreakdown
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            GroupBox("By day") {
+        GlassGroup(spacing: 16) {
+            VStack(alignment: .leading, spacing: 16) {
+            GlassCard(title: "By day") {
                 Table(breakdown.days) {
                     TableColumn("Day") { day in
                         Text(day.day, format: .dateTime.weekday(.wide).month().day())
@@ -147,8 +156,9 @@ private struct UsageTable: View {
                     }
                 }
                 .frame(minHeight: 200)
+                .scrollContentBackground(.hidden)
             }
-            GroupBox("By model") {
+            GlassCard(title: "By model") {
                 Table(breakdown.models) {
                     TableColumn("Model", value: \.displayName)
                     TableColumn("Tokens") { m in
@@ -159,6 +169,8 @@ private struct UsageTable: View {
                     }
                 }
                 .frame(minHeight: 120)
+                .scrollContentBackground(.hidden)
+            }
             }
         }
     }

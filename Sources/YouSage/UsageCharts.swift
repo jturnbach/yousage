@@ -44,8 +44,13 @@ struct TrendChart: View {
                 RuleMark(x: .value("Day", selected.day, unit: .day))
                     .foregroundStyle(.quaternary)
                     .zIndex(-1)
-                    .annotation(position: .top, spacing: 0,
-                                overflowResolution: .init(x: .fit(to: .chart), y: .disabled)) {
+                    // The rule spans the whole plot, so `.top` anchors at the
+                    // plot's ceiling and the annotation lands outside it. Clamp
+                    // both axes to the chart or the tooltip is cropped by the
+                    // card above — which is exactly what happened.
+                    .annotation(position: .top, spacing: 4,
+                                overflowResolution: .init(x: .fit(to: .chart),
+                                                          y: .fit(to: .chart))) {
                         DayTooltip(day: selected)
                     }
             }
@@ -61,7 +66,9 @@ struct TrendChart: View {
             }
         }
         .chartYAxis {
-            AxisMarks { value in
+            // Leading, to agree with the two horizontal charts below, which name
+            // their rows down the left edge.
+            AxisMarks(position: .leading) { value in
                 AxisGridLine()   // solid hairline; never dashed
                 AxisValueLabel {
                     if let count = value.as(Int.self) {
@@ -69,6 +76,14 @@ struct TrendChart: View {
                     }
                 }
             }
+        }
+        // Glass is translucent, and the bar hues were validated for contrast
+        // against a settled surface. Give the plot its own quiet backing so the
+        // wallpaper behind the window cannot erode that.
+        .chartPlotStyle { plot in
+            plot.background(
+                RoundedRectangle(cornerRadius: 8).fill(.background.opacity(0.4))
+            )
         }
         .chartLegend(position: .bottom, alignment: .leading, spacing: 12)
         .frame(minHeight: 220)
@@ -102,9 +117,8 @@ private struct DayTooltip: View {
             }
         }
         .font(.caption)
-        .padding(8)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-        .shadow(radius: 2, y: 1)
+        .padding(10)
+        .glassSurface(cornerRadius: 10)
         .fixedSize()
     }
 }

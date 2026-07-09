@@ -59,3 +59,16 @@ private let oneMillionCacheReads = TokenTotals(cacheRead: 1_000_000)
 @Test func aBareFamilyWordIsNotAModelID() {
     #expect(Pricing.cost(oneMillionInput, model: "opus") == nil)
 }
+
+@Test func providerPrefixedIDsArePricedLikeTheirBareForm() {
+    // Bedrock and Vertex record the model as `anthropic.claude-…`.
+    // ModelTokens.displayName already strips this prefix; so must pricing.
+    #expect(Pricing.cost(oneMillionInput, model: "anthropic.claude-opus-4-8") == 5.0)
+    #expect(Pricing.cost(oneMillionInput, model: "anthropic.claude-sonnet-9-3") == 3.0)
+    #expect(Pricing.normalize("anthropic.claude-opus-4-8") == "claude-opus-4-8")
+}
+
+@Test func aFamilyWordMustEndAtAHyphenOrTheEndOfTheID() {
+    #expect(Pricing.cost(oneMillionInput, model: "claude-opusglobular") == nil)
+    #expect(Pricing.cost(oneMillionInput, model: "claude-sonnets-turbo") == nil)
+}

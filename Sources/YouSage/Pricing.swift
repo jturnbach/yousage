@@ -42,10 +42,15 @@ enum Pricing {
         ("haiku",  ModelRate(input: 1,  output: 5)),
     ]
 
-    /// Drops the parts of a model id that never affect price: a bracketed
-    /// variant (`[1m]`) and a trailing 8-digit date stamp (`-20251001`).
+    /// Drops the parts of a model id that never affect price: a provider prefix
+    /// (`anthropic.`), a bracketed variant (`[1m]`), and a trailing 8-digit date
+    /// stamp (`-20251001`). `ModelTokens.displayName` strips the same provider
+    /// prefix, so ids reach us in both forms.
     static func normalize(_ model: String) -> String {
         var id = model
+        if id.hasPrefix("anthropic.") {
+            id = String(id.dropFirst("anthropic.".count))
+        }
         if let bracket = id.firstIndex(of: "[") {
             id = String(id[id.startIndex..<bracket])
         }
@@ -60,7 +65,17 @@ enum Pricing {
         if let exact = table[model] { return exact }
         let normalized = normalize(model)
         if let match = table[normalized] { return match }
-        return families.first { normalized.hasPrefix("claude-\($0.name)") }?.rate
+        return families.first { isFamily($0.name, of: normalized) }?.rate
+    }
+
+    /// True when `id` names a release in `family` — the family word must sit
+    /// immediately after `claude-` and end at a hyphen or the end of the id.
+    /// Anchoring both edges keeps `claude-opus-7-0` (a future release) matching
+    /// while rejecting `claude-3-opus` (a past generation that priced
+    /// differently) and `claude-opusglobular` (not a model at all).
+    private static func isFamily(_ family: String, of id: String) -> Bool {
+        let stem = "claude-\(family)"
+        return id == stem || id.hasPrefix("\(stem)-")
     }
 
     /// Dollars these counters would cost at `model`'s list price, or nil when

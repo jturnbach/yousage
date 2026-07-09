@@ -48,3 +48,14 @@ private let oneMillionCacheReads = TokenTotals(cacheRead: 1_000_000)
 @Test func emptyTotalsCostNothingYetAreStillPriced() {
     #expect(Pricing.cost(TokenTotals(), model: "claude-opus-4-8") == 0.0)
 }
+
+@Test func legacyGenerationIDsAreUnpricedRatherThanMispricedAsCurrent() {
+    // Claude 3 Opus listed at $15/$75, not the current Opus $5/$25. An
+    // unanchored family match would confidently return the wrong number.
+    #expect(Pricing.cost(oneMillionInput, model: "claude-3-opus-20240229") == nil)
+    #expect(Pricing.cost(oneMillionInput, model: "claude-3-haiku-20240307") == nil)
+}
+
+@Test func aBareFamilyWordIsNotAModelID() {
+    #expect(Pricing.cost(oneMillionInput, model: "opus") == nil)
+}

@@ -31,7 +31,9 @@ enum Pricing {
 
     /// Consulted when an id isn't in `table`, so a point release published after
     /// this code was written still prices at its family's rate instead of
-    /// vanishing from the total.
+    /// vanishing from the total. The family must sit immediately after
+    /// `claude-`: a legacy id like `claude-3-opus` names a generation that
+    /// priced differently, and reporting it as unpriced beats pricing it wrong.
     private static let families: [(name: String, rate: ModelRate)] = [
         ("fable",  ModelRate(input: 10, output: 50)),
         ("mythos", ModelRate(input: 10, output: 50)),
@@ -58,7 +60,7 @@ enum Pricing {
         if let exact = table[model] { return exact }
         let normalized = normalize(model)
         if let match = table[normalized] { return match }
-        return families.first { normalized.contains($0.name) }?.rate
+        return families.first { normalized.hasPrefix("claude-\($0.name)") }?.rate
     }
 
     /// Dollars these counters would cost at `model`'s list price, or nil when

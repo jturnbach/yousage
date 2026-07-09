@@ -22,6 +22,11 @@ struct YouSageApp: App {
         }
         .menuBarExtraStyle(.window)
 
+        Window("Usage Details", id: "usage") {
+            UsageWindow()
+        }
+        .defaultSize(width: 760, height: 640)
+
         Window("YouSage Settings", id: "settings") {
             SettingsView()
                 .frame(width: 520, height: 520)

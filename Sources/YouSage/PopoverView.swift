@@ -202,6 +202,7 @@ struct PopoverView: View {
                     }
                 }
                 Divider()
+                Button("Usage Details…") { openUsageDetails() }
                 Button("Settings…") { openSettings() }
                 Button("Open claude.ai/settings/usage") {
                     if let url = URL(string: "https://claude.ai/settings/usage") {
@@ -220,6 +221,11 @@ struct PopoverView: View {
         }
         .padding(.horizontal, 14)
         .padding(.top, 10)
+    }
+
+    private func openUsageDetails() {
+        openWindow(id: "usage")
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func openSettings() {

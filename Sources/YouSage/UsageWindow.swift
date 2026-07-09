@@ -11,6 +11,17 @@ struct UsageWindow: View {
                         "YouSage reads Claude Code's local transcripts to count tokens.") {
                     Button("Turn on token tracking") { state.setTokenTracking(true) }
                 }
+            } else if !state.hasScannedTokens {
+                // nil breakdown means "not read yet" until the first scan lands.
+                // Claiming "no transcripts" here would contradict a user who just
+                // switched tracking on.
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text("Reading Claude Code transcripts…")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let breakdown = state.usageBreakdown {
                 if breakdown.totals.messages == 0 {
                     message("No activity in the last 7 days",
@@ -80,28 +91,26 @@ struct UsageWindow: View {
     }
 
     private func header(_ breakdown: UsageBreakdown) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            kpi(NumberFormat.tokens(breakdown.totals.total), "tokens")
-            kpi(breakdown.cost.display, "at API list prices")
-            kpi("\(breakdown.totals.messages)", "messages")
-            Spacer()
-            Picker("", selection: $showTable) {
-                Image(systemName: "chart.bar.xaxis").tag(false)
-                Image(systemName: "tablecells").tag(true)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline) {
+                kpi(NumberFormat.tokens(breakdown.totals.total), "tokens")
+                kpi(breakdown.cost.display, "at API list prices")
+                kpi("\(breakdown.totals.messages)", "messages")
+                Spacer()
+                Picker("", selection: $showTable) {
+                    Image(systemName: "chart.bar.xaxis").tag(false)
+                    Image(systemName: "tablecells").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
-        }
-        .overlay(alignment: .bottomLeading) {
             // The popover's "Last 7 days" is a rolling window pinned to claude.ai's
             // reset. This window is calendar days. The labels keep them apart.
             Text("last 7 calendar days")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
-                .offset(y: 16)
         }
-        .padding(.bottom, 16)
     }
 
     private func kpi(_ value: String, _ label: String) -> some View {

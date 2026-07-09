@@ -19,6 +19,10 @@ final class AppState: ObservableObject {
     @Published private(set) var tokenTrackingEnabled: Bool = true
     @Published private(set) var tokenReport: TokenReport?
     @Published private(set) var usageBreakdown: UsageBreakdown?
+    /// False until the first transcript scan of the current session finishes.
+    /// Distinguishes "still reading" from "there is nothing to read" — a nil
+    /// `usageBreakdown` alone cannot tell those apart.
+    @Published private(set) var hasScannedTokens = false
     /// Raw status + body of the most recent failed /usage attempt, surfaced in
     /// the Settings → Debug panel to diagnose plan-specific endpoint issues.
     @Published private(set) var lastErrorDetail: String?
@@ -140,6 +144,8 @@ final class AppState: ObservableObject {
             // the other would leave a stale chart behind a switched-off feature.
             tokenReport = nil
             usageBreakdown = nil
+            // Re-enabling must show "reading…", not "nothing found".
+            hasScannedTokens = false
         }
     }
 
@@ -257,6 +263,7 @@ final class AppState: ObservableObject {
                 guard let self else { return }
                 self.tokenReport = report
                 self.usageBreakdown = breakdown
+                self.hasScannedTokens = true
                 self.lastTokenScan = Date()
                 self.tokenScan = nil
             }

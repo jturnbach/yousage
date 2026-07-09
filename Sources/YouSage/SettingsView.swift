@@ -13,12 +13,16 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Text("YouSage")
                     .font(.title2.bold())
-                Text("Reads your Claude subscription usage directly from claude.ai. Your session key is stored in the macOS Keychain and only sent to claude.ai.")
+                Text("Reads your Claude usage directly from claude.ai — subscription rate limits or enterprise allotted usage, whichever your plan reports. Your session key is stored in the macOS Keychain and only sent to claude.ai.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 connectionSection
+                Divider()
+                planSection
+                Divider()
+                tokenSection
                 Divider()
                 instructions
                 Divider()
@@ -106,6 +110,82 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Plan
+
+    private var planSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Plan")
+                .font(.headline)
+
+            Picker("", selection: Binding(
+                get: { state.planMode },
+                set: { state.setPlanMode($0) }
+            )) {
+                ForEach(PlanMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text(planExplanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if state.planMode == .auto, state.detectedPlan != .unknown {
+                HStack(spacing: 6) {
+                    Image(systemName: "wand.and.stars")
+                        .foregroundStyle(.secondary)
+                    Text("Detected: \(state.detectedPlan.displayName)")
+                        .font(.callout)
+                }
+            }
+        }
+    }
+
+    private var planExplanation: String {
+        switch state.planMode {
+        case .auto:
+            return "Reads the shape of your usage data: absolute used-of-granted amounts mean an enterprise plan, rate-limit percentages mean a subscription. Leave this on unless it guesses wrong."
+        case .subscription:
+            return "Shows your 5-hour session, weekly limits, and any additional limits Anthropic reports — including new ones, which appear automatically. Hides enterprise allotments."
+        case .enterprise:
+            return "Leads with allotted usage (amount used of the amount granted). Any rate limits your account also reports stay visible below."
+        }
+    }
+
+    // MARK: - Token tracking
+
+    private var tokenSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Token tracker")
+                .font(.headline)
+
+            Toggle("Show tokens used at the bottom of the popover", isOn: Binding(
+                get: { state.tokenTrackingEnabled },
+                set: { state.setTokenTracking($0) }
+            ))
+
+            Text("Counts tokens from Claude Code transcripts stored on this Mac (~/.claude/projects), split by the same 5-hour and weekly windows claude.ai reports. Conversations in the Claude app, on claude.ai, or on another computer consume the same limits but leave no transcript here, so they aren't counted.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if state.tokenTrackingEnabled {
+                if let report = state.tokenReport {
+                    Text("Scanned \(report.filesScanned) transcript\(report.filesScanned == 1 ? "" : "s") · \(NumberFormat.tokens(report.week.total)) tokens over \(report.week.messages) messages in the last 7 days.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Text("No Claude Code transcripts found on this Mac.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+    }
+
     // MARK: - Instructions
 
     private var instructions: some View {
@@ -152,6 +232,21 @@ struct SettingsView: View {
                         Text("Organization UUID: \(uuid)")
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
+                    }
+                    if let detail = state.lastErrorDetail {
+                        Text("Last failed request:")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.orange)
+                        ScrollView {
+                            Text(detail)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(8)
+                        }
+                        .frame(height: 120)
+                        .background(Color.orange.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                     }
                     if let snap = state.snapshot {
                         Text("Last fetched: \(snap.fetchedAt.formatted(date: .abbreviated, time: .standard))")

@@ -1,16 +1,38 @@
 # YouSage
 
-A tiny macOS menu bar app that mirrors your Claude subscription usage from
-[claude.ai/settings/usage](https://claude.ai/settings/usage).
+A tiny macOS menu bar app that mirrors your Claude usage from
+[claude.ai/settings/usage](https://claude.ai/settings/usage). Works with both
+**subscription** plans (Pro/Max rate limits) and **enterprise / team** plans
+with **allotted usage**.
 
-- Shows current 5-hour session % and weekly limits (All models, Sonnet only,
-  Claude Design / Opus, OAuth apps).
-- Pick which metric the menu bar % reflects — highest of all, current session,
-  or weekly all-models.
+- **Subscription:** shows the current 5-hour session, the weekly all-models
+  limit, and **every other limit your account reports** — including per-model
+  weekly caps like Fable. New limits appear on their own: the app reads the
+  self-describing limit list claude.ai returns rather than a hardcoded set of
+  names, so a cap for a model that doesn't exist yet still shows up, correctly
+  labelled, with no app update.
+- **Enterprise / pay-per-token:** shows allotted usage, extra usage, and prepaid
+  usage credits as an absolute "used / total" amount, the derived percentage,
+  and when it renews.
+- **Plan detection is automatic** — absolute used-of-granted amounts mean an
+  enterprise plan, rate-limit percentages mean a subscription. Settings → Plan
+  lets you pin it to Subscription or Enterprise if the guess is ever wrong.
+- **Token tracker** at the bottom of the popover: tokens used in the current
+  5-hour window and over the last 7 days, split into input / output / cache,
+  with a per-model breakdown. Counted from Claude Code transcripts on this Mac
+  (`~/.claude/projects`) and bucketed into the *same* windows claude.ai reports,
+  so the numbers line up with the percentages above them.
+- Pick which metric the menu bar % reflects — highest of all, allotted usage,
+  current session, or weekly all-models.
 - Auto-refreshes every 60s in the background, every 15s while the popover is
   open. Pauses on sleep, refreshes on wake.
 - Session key is stored in the macOS Keychain. Network traffic goes only to
   `claude.ai`.
+
+> The token tracker sees Claude Code on **this Mac** only. Conversations in the
+> Claude desktop app, on claude.ai, or on another computer draw down the same
+> limits but leave no local transcript, so they aren't counted. The percentages
+> come from claude.ai and are always complete; the token counts are not.
 
 > Unofficial. Not affiliated with Anthropic. Uses undocumented endpoints that
 > the claude.ai web app calls — they can change without notice.
@@ -68,13 +90,21 @@ It calls two unofficial endpoints the `claude.ai` web frontend uses:
 - `GET https://claude.ai/api/organizations` — to discover your org UUID
 - `GET https://claude.ai/api/organizations/{uuid}/usage` — for the usage data
 
-The parser tolerates both the `utilization` / `utilization_pct` and
-`resets_at` / `reset_at` field-name variants that community reverse-engineering
-efforts have reported, and surfaces any unknown usage-shaped fields so new
-Anthropic categories show up automatically.
+The same `/usage` endpoint serves two shapes, and the parser handles both:
 
-If Anthropic changes the schema, the **Debug** disclosure inside Settings shows
-the raw JSON so the parser is easy to update.
+- **Rate-limit (subscription):** a bare `utilization` / `utilization_pct`
+  percentage with a rolling `resets_at` / `reset_at` window.
+- **Allotment (enterprise / team):** an absolute amount consumed of a granted
+  total. The parser probes the common container keys (`allotments`, `limits`,
+  `quotas`, `usage`, …) and a broad set of field names (`used` / `consumed` /
+  `spent`, `limit` / `allotment` / `quota` / `granted` / `total`, `remaining` /
+  `available`), reconstructing whichever of used/total is missing from
+  `remaining`, and reads the `unit` / `currency` if present.
+
+Anything usage-shaped that isn't explicitly recognized is still surfaced rather
+than dropped, and the **Debug** disclosure inside Settings shows the raw JSON —
+so if your plan uses field names not listed above, they're easy to pin down and
+add.
 
 ## Project layout
 

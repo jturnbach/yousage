@@ -10,6 +10,12 @@ struct PopoverView: View {
             header
             Divider().padding(.horizontal, 14)
             content
+            if state.tokenTrackingEnabled, let report = state.tokenReport, report.hasAnyData {
+                Divider().padding(.horizontal, 14)
+                TokenTrackerView(report: report)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+            }
             Divider().padding(.horizontal, 14)
             footer
         }
@@ -53,8 +59,8 @@ struct PopoverView: View {
     private var content: some View {
         if !state.isConfigured {
             unconfiguredView
-        } else if let snapshot = state.snapshot {
-            sectionsView(snapshot: snapshot)
+        } else if state.snapshot != nil {
+            sectionsView(sections: state.visibleSections)
         } else if let err = state.lastError {
             errorView(message: err)
         } else {
@@ -97,20 +103,66 @@ struct PopoverView: View {
         .padding(.vertical, 12)
     }
 
-    private func sectionsView(snapshot: UsageSnapshot) -> some View {
-        let sessionSections = snapshot.sections.filter { $0.kind == .session }
-        let weeklySections  = snapshot.sections.filter { $0.kind == .weekly }
-
-        return VStack(alignment: .leading, spacing: 16) {
-            if !sessionSections.isEmpty {
-                groupBlock(title: "Plan usage limits", sections: sessionSections)
+    @ViewBuilder
+    private func sectionsView(sections: [UsageSection]) -> some View {
+        if sections.isEmpty {
+            emptyPlanView
+        } else {
+            // Groups render in the order the sections arrive, so an enterprise
+            // account leads with allotments and a subscription with its session.
+            let groups = Self.grouped(sections)
+            VStack(alignment: .leading, spacing: 16) {
+                ForEach(groups, id: \.title) { group in
+                    groupBlock(title: group.title, sections: group.sections)
+                }
             }
-            if !weeklySections.isEmpty {
-                groupBlock(title: "Weekly limits", sections: weeklySections)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private var emptyPlanView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(state.planMode == .enterprise
+                 ? "No allotted usage reported for this account."
+                 : "claude.ai reported no usage limits for this account.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if state.planMode != .auto {
+                Text("Settings → Plan is set to \(state.planMode.displayName). Try Automatic.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+    }
+
+    private struct LimitGroup {
+        let title: String
+        let sections: [UsageSection]
+    }
+
+    /// Buckets sections under headings, preserving the incoming order so the
+    /// heading order follows the plan's priority rather than a fixed list.
+    private static func grouped(_ sections: [UsageSection]) -> [LimitGroup] {
+        func heading(_ kind: UsageSection.Kind) -> String {
+            switch kind {
+            case .allotment: return "Allotted usage"
+            case .session:   return "Plan usage limits"
+            case .weekly:    return "Weekly limits"
+            case .other:     return "Other limits"
+            }
+        }
+        var order: [String] = []
+        var buckets: [String: [UsageSection]] = [:]
+        for section in sections {
+            let title = heading(section.kind)
+            if buckets[title] == nil { order.append(title) }
+            buckets[title, default: []].append(section)
+        }
+        return order.map { LimitGroup(title: $0, sections: buckets[$0] ?? []) }
     }
 
     private func groupBlock(title: String, sections: [UsageSection]) -> some View {
@@ -176,6 +228,78 @@ struct PopoverView: View {
     }
 }
 
+// MARK: - Token tracker
+
+struct TokenTrackerView: View {
+    let report: TokenReport
+
+    private static let sourceNote = """
+    Tokens counted from Claude Code transcripts stored on this Mac \
+    (~/.claude/projects). Chats in the Claude app, on claude.ai, or on another \
+    computer draw down the same limits but aren't counted here.
+    """
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 4) {
+                Text("Tokens used")
+                    .font(.system(size: 13, weight: .semibold))
+                InfoTip(text: Self.sourceNote)
+                Spacer()
+            }
+
+            row(title: "Current session",
+                subtitle: sessionSubtitle,
+                totals: report.session)
+
+            row(title: "Last 7 days",
+                subtitle: nil,
+                totals: report.week)
+
+            if report.models.count > 1 {
+                Text(report.models.prefix(3)
+                        .map { "\($0.displayName) \(NumberFormat.tokens($0.totals.total))" }
+                        .joined(separator: " · "))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+        }
+    }
+
+    private var sessionSubtitle: String? {
+        guard let start = report.sessionStart else { return "No activity in the current window" }
+        let f = DateFormatter()
+        f.dateFormat = "h:mm a"
+        let since = "Since \(f.string(from: start))"
+        return report.sessionIsAuthoritative ? since : "\(since) (estimated window)"
+    }
+
+    private func row(title: String, subtitle: String?, totals: TokenTotals) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .regular))
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(NumberFormat.tokens(totals.total))
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                Text(totals.breakdown)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+        }
+    }
+}
+
 struct SectionRow: View {
     let section: UsageSection
     @State private var now = Date()
@@ -188,6 +312,12 @@ struct SectionRow: View {
                 HStack(spacing: 4) {
                     Text(section.title)
                         .font(.system(size: 13, weight: .regular))
+                    if !section.isRecognized {
+                        Image(systemName: "sparkle")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                            .help("New limit reported by claude.ai")
+                    }
                     if let note = section.infoNote {
                         InfoTip(text: note)
                     }
@@ -202,10 +332,21 @@ struct SectionRow: View {
             VStack(alignment: .trailing, spacing: 4) {
                 UsageBar(percent: section.percent)
                     .frame(width: 130, height: 6)
-                Text("\(Int(section.percent.rounded()))% used")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+                if let amounts = section.allotmentText {
+                    Text(amounts)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                    Text("\(Int(section.percent.rounded()))% used")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                } else {
+                    Text("\(Int(section.percent.rounded()))% used")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
             }
         }
         .onReceive(tick) { now = $0 }
@@ -225,11 +366,19 @@ struct SectionRow: View {
             let f = DateFormatter()
             f.dateFormat = "EEE h:mm a"
             return "Resets \(f.string(from: date))"
+        case .allotment:
+            let f = DateFormatter()
+            f.dateFormat = "MMM d"
+            return "Renews \(f.string(from: date))"
+        case .other:
+            let f = RelativeDateTimeFormatter()
+            f.unitsStyle = .full
+            return "Resets \(f.localizedString(for: date, relativeTo: now))"
         }
     }
 }
 
-private struct InfoTip: View {
+struct InfoTip: View {
     let text: String
     @State private var showing = false
 

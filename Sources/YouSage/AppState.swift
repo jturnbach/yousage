@@ -15,15 +15,30 @@ final class AppState: ObservableObject {
     @Published private(set) var orgUUID: String?
     @Published private(set) var consecutiveFailures: Int = 0
     @Published private(set) var menuBarMetric: MenuBarMetric = .highest
+    @Published private(set) var planMode: PlanMode = .auto
+    @Published private(set) var tokenTrackingEnabled: Bool = true
+    @Published private(set) var tokenReport: TokenReport?
+    /// Raw status + body of the most recent failed /usage attempt, surfaced in
+    /// the Settings → Debug panel to diagnose plan-specific endpoint issues.
+    @Published private(set) var lastErrorDetail: String?
+
+    private var lastFailStatus: Int?
+    /// Whether the signed-in org advertises enterprise capabilities. Only used
+    /// to break ties when the usage payload alone is inconclusive.
+    private var orgLooksEnterprise = false
 
     private let client = ClaudeClient()
     private var pollTask: Task<Void, Never>?
     private var inflight: Task<Void, Never>?
+    private var tokenScan: Task<Void, Never>?
+    private var lastTokenScan: Date?
     private var isPopoverOpen = false
 
     private static let orgUUIDKey = "YouSage.orgUUID"
     private static let orgNameKey = "YouSage.orgName"
     private static let metricKey  = "YouSage.menuBarMetric"
+    private static let planKey    = "YouSage.planMode"
+    private static let tokensKey  = "YouSage.tokenTracking"
 
     private init() {
         sessionKey = Keychain.read(account: "sessionKey")
@@ -33,9 +48,17 @@ final class AppState: ObservableObject {
            let m = MenuBarMetric(rawValue: raw) {
             menuBarMetric = m
         }
+        if let raw = UserDefaults.standard.string(forKey: Self.planKey),
+           let p = PlanMode(rawValue: raw) {
+            planMode = p
+        }
+        if UserDefaults.standard.object(forKey: Self.tokensKey) != nil {
+            tokenTrackingEnabled = UserDefaults.standard.bool(forKey: Self.tokensKey)
+        }
 
         registerWorkspaceObservers()
 
+        refreshTokens()
         if sessionKey?.isEmpty == false {
             refresh()
             restartPoll()
@@ -55,29 +78,107 @@ final class AppState: ObservableObject {
         return "Loading…"
     }
 
+    // MARK: - Plan
+
+    /// What the account actually looks like, read off the usage payload. An
+    /// allotment (an absolute used-of-granted amount) only ever appears on
+    /// seat/credit plans; bare utilization percentages only on subscriptions.
+    var detectedPlan: DetectedPlan {
+        guard let sections = snapshot?.sections, !sections.isEmpty else {
+            return orgLooksEnterprise ? .enterprise : .unknown
+        }
+        if sections.contains(where: { $0.kind == .allotment }) { return .enterprise }
+        if sections.contains(where: { $0.kind == .session || $0.kind == .weekly }) { return .subscription }
+        return orgLooksEnterprise ? .enterprise : .unknown
+    }
+
+    /// The plan YouSage presents: the detected one unless the user overrode it.
+    var effectivePlan: DetectedPlan {
+        switch planMode {
+        case .auto:         return detectedPlan
+        case .subscription: return .subscription
+        case .enterprise:   return .enterprise
+        }
+    }
+
+    /// Sections to show, ordered for the active plan. Only the subscription view
+    /// hides anything — allotments are meaningless there. Enterprise accounts
+    /// still have 5-hour and weekly limits, so those stay visible, just below
+    /// the allotments they care about most.
+    var visibleSections: [UsageSection] {
+        guard let sections = snapshot?.sections else { return [] }
+        switch effectivePlan {
+        case .subscription:
+            return sections.filter { $0.kind != .allotment }
+        case .enterprise:
+            return sections.sorted { a, b in
+                let ao = a.kind == .allotment ? 0 : 1
+                let bo = b.kind == .allotment ? 0 : 1
+                return ao != bo ? ao < bo : a.rank < b.rank
+            }
+        case .unknown:
+            return sections
+        }
+    }
+
+    func setPlanMode(_ mode: PlanMode) {
+        guard mode != planMode else { return }
+        planMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.planKey)
+        applyDefaultMetric()
+    }
+
+    func setTokenTracking(_ enabled: Bool) {
+        guard enabled != tokenTrackingEnabled else { return }
+        tokenTrackingEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.tokensKey)
+        if enabled { refreshTokens(force: true) } else { tokenReport = nil }
+    }
+
     var highestPercent: Double? {
-        snapshot?.sections.map(\.percent).max()
+        visibleSections.map(\.percent).max()
     }
 
     /// Percentage to show in the menu bar, based on the user-selected metric.
     /// Returns nil while there's no snapshot yet (or when the chosen section
     /// is absent from the response).
     var displayPercent: Double? {
-        guard let sections = snapshot?.sections, !sections.isEmpty else { return nil }
+        let sections = visibleSections
+        guard !sections.isEmpty else { return nil }
         switch menuBarMetric {
         case .highest:
             return sections.map(\.percent).max()
+        case .allotment:
+            // Highest allotment metric; fall back to overall highest so the
+            // menu bar is never blank if naming differs on this plan.
+            let allot = sections.filter { $0.kind == .allotment }.map(\.percent).max()
+            return allot ?? sections.map(\.percent).max()
         case .session:
-            return sections.first(where: { $0.id == "five_hour" })?.percent
+            return snapshot?.sessionSection?.percent
         case .weekly:
-            return sections.first(where: { $0.id == "seven_day" })?.percent
+            return snapshot?.weeklyAllSection?.percent
+                ?? sections.first(where: { $0.kind == .weekly })?.percent
         }
+    }
+
+    /// True once we've seen at least one enterprise allotment metric, so the UI
+    /// can default the menu bar to "Allotted usage".
+    var hasAllotmentData: Bool {
+        snapshot?.sections.contains { $0.kind == .allotment } ?? false
     }
 
     func setMenuBarMetric(_ m: MenuBarMetric) {
         guard m != menuBarMetric else { return }
         menuBarMetric = m
         UserDefaults.standard.set(m.rawValue, forKey: Self.metricKey)
+    }
+
+    /// Until the user picks a metric explicitly, follow the plan: allotment
+    /// plans lead with the allotment, subscriptions with whichever limit is
+    /// closest to its cap.
+    private func applyDefaultMetric() {
+        guard UserDefaults.standard.string(forKey: Self.metricKey) == nil else { return }
+        menuBarMetric = (effectivePlan == .enterprise && hasAllotmentData) ? .allotment : .highest
     }
 
     // MARK: - Auth
@@ -90,6 +191,7 @@ final class AppState: ObservableObject {
         // Force re-resolving the org since the key changed.
         orgUUID = nil
         orgName = nil
+        orgLooksEnterprise = false
         UserDefaults.standard.removeObject(forKey: Self.orgUUIDKey)
         UserDefaults.standard.removeObject(forKey: Self.orgNameKey)
         consecutiveFailures = 0
@@ -105,6 +207,7 @@ final class AppState: ObservableObject {
         sessionKey = nil
         orgUUID = nil
         orgName = nil
+        orgLooksEnterprise = false
         snapshot = nil
         lastError = nil
         lastFetched = nil
@@ -118,10 +221,33 @@ final class AppState: ObservableObject {
     // MARK: - Refresh
 
     func refresh() {
+        refreshTokens()
         guard isConfigured else { return }
         inflight?.cancel()
         inflight = Task { [weak self] in
             await self?.performRefresh()
+        }
+    }
+
+    /// Token counts come from local transcripts, so they refresh independently
+    /// of the network — they stay correct even while claude.ai is unreachable.
+    ///
+    /// `force` bypasses the coalescing window, which a fresh snapshot needs: its
+    /// reset times redefine the windows even when no new tokens were written.
+    private func refreshTokens(force: Bool = false) {
+        guard tokenTrackingEnabled, tokenScan == nil else { return }
+        if !force, let last = lastTokenScan, Date().timeIntervalSince(last) < 5 { return }
+
+        let session = snapshot?.sessionSection?.resetsAt
+        let week = snapshot?.weeklyAllSection?.resetsAt
+        tokenScan = Task { [weak self] in
+            let report = await TokenTracker.shared.report(sessionResetsAt: session, weekResetsAt: week)
+            await MainActor.run {
+                guard let self else { return }
+                self.tokenReport = report
+                self.lastTokenScan = Date()
+                self.tokenScan = nil
+            }
         }
     }
 
@@ -132,40 +258,81 @@ final class AppState: ObservableObject {
         }
         isLoading = true
         defer { isLoading = false }
+        lastFailStatus = nil
 
         do {
-            let uuid: String
-            if let cached = orgUUID {
-                uuid = cached
-            } else {
-                let orgs = try await client.fetchOrganizations(sessionKey: key)
-                guard let first = orgs.first else { throw ClaudeError.noOrg }
-                uuid = first.uuid
-                orgUUID = first.uuid
-                orgName = first.name
-                UserDefaults.standard.set(first.uuid, forKey: Self.orgUUIDKey)
-                if let n = first.name { UserDefaults.standard.set(n, forKey: Self.orgNameKey) }
+            // Fast path: an org that served usage before.
+            if let cached = orgUUID,
+               let snap = try await tryUsage(orgUUID: cached, name: orgName, key: key) {
+                applySuccess(snap, uuid: cached, name: orgName)
+                return
             }
-            let snap = try await client.fetchUsage(orgUUID: uuid, sessionKey: key)
-            self.snapshot = snap
-            self.lastError = nil
-            self.lastFetched = Date()
-            self.consecutiveFailures = 0
+
+            // Otherwise enumerate every org on the account and try each — an
+            // enterprise account often belongs to multiple orgs and only one
+            // (or a non-first one) serves the usage endpoint.
+            let orgs = try await client.fetchOrganizations(sessionKey: key)
+            guard !orgs.isEmpty else { throw ClaudeError.noOrg }
+            for o in orgs {
+                if let snap = try await tryUsage(orgUUID: o.uuid, name: o.name, key: key) {
+                    orgLooksEnterprise = o.looksEnterprise
+                    applySuccess(snap, uuid: o.uuid, name: o.name)
+                    return
+                }
+            }
+
+            // Every org rejected /usage. Report the last HTTP status, keeping
+            // the captured body in lastErrorDetail for the Debug panel.
+            self.lastError = ClaudeError.http(status: lastFailStatus ?? 0, body: "").userMessage
+            self.consecutiveFailures += 1
         } catch is CancellationError {
             // Ignored
         } catch let err as ClaudeError {
             self.lastError = err.userMessage
             self.consecutiveFailures += 1
-            // If the org UUID seems stale (404 / 403 on /usage), drop it so the
-            // next attempt re-fetches /organizations.
-            if case .http(let code, _) = err, code == 404 || code == 403 {
-                self.orgUUID = nil
-                UserDefaults.standard.removeObject(forKey: Self.orgUUIDKey)
-            }
         } catch {
             self.lastError = error.localizedDescription
             self.consecutiveFailures += 1
         }
+    }
+
+    /// Attempts the usage endpoint for one org. Returns the snapshot on success,
+    /// nil on an HTTP rejection (recording status + body for diagnostics so the
+    /// caller can try the next org), and rethrows network/decoding failures.
+    private func tryUsage(orgUUID: String, name: String?, key: String) async throws -> UsageSnapshot? {
+        do {
+            return try await client.fetchUsage(orgUUID: orgUUID, sessionKey: key)
+        } catch let e as ClaudeError {
+            if case .http(let code, let body) = e {
+                lastFailStatus = code
+                let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+                lastErrorDetail = """
+                Org: \(name ?? "?")  [\(orgUUID)]
+                GET /api/organizations/\(orgUUID)/usage → HTTP \(code)
+                \(trimmed.isEmpty ? "(empty body)" : String(trimmed.prefix(1200)))
+                """
+                return nil
+            }
+            throw e
+        }
+    }
+
+    private func applySuccess(_ snap: UsageSnapshot, uuid: String, name: String?) {
+        orgUUID = uuid
+        orgName = name
+        UserDefaults.standard.set(uuid, forKey: Self.orgUUIDKey)
+        if let name { UserDefaults.standard.set(name, forKey: Self.orgNameKey) }
+
+        snapshot = snap
+        lastError = nil
+        lastErrorDetail = nil
+        lastFetched = Date()
+        consecutiveFailures = 0
+
+        applyDefaultMetric()
+        // Now that the real reset times are known, re-bucket the tokens against
+        // the same windows claude.ai is measuring.
+        refreshTokens(force: true)
     }
 
     // MARK: - Polling

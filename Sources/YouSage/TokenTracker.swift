@@ -1,0 +1,275 @@
+import Foundation
+
+/// Sums token usage from Claude Code's local transcripts.
+///
+/// claude.ai's `/usage` endpoint reports how *full* each limit is, never how
+/// many tokens produced that number. Claude Code writes every assistant turn —
+/// including its exact `usage` block — to `~/.claude/projects/**/*.jsonl`, so
+/// that's where the token counts come from.
+///
+/// Scope worth being honest about: this sees Claude Code on *this Mac* only.
+/// Conversations in the Claude desktop app, on claude.ai, or on another machine
+/// consume the same limits but leave no transcript here. Treat these numbers as
+/// "tokens Claude Code spent", not "tokens behind the percentages above".
+///
+/// Rescans are incremental: each file is read from where the last scan stopped,
+/// and files untouched within the retention window are never opened.
+actor TokenTracker {
+    static let shared = TokenTracker()
+
+    /// Keep slightly more than a week so the 7-day window is always fully covered.
+    private static let retention: TimeInterval = 8 * 24 * 3600
+    private static let sessionLength: TimeInterval = 5 * 3600
+    /// Ceiling on bytes ingested per scan, so a pathological backlog can't stall
+    /// a refresh. Whatever is missed is picked up on the next pass.
+    private static let byteBudgetPerScan = 96 * 1024 * 1024
+
+    private struct Cursor {
+        var offset: UInt64
+        /// Guards against a transcript being replaced at the same path: a new
+        /// creation date means the old byte offset is meaningless.
+        var created: Date
+    }
+
+    private struct Event {
+        let id: String
+        let date: Date
+        let model: String
+        let totals: TokenTotals
+    }
+
+    private let root: URL
+    private var cursors: [String: Cursor] = [:]
+    private var events: [Event] = []
+    private var seen: Set<String> = []
+    private var filesScanned = 0
+
+    init(root: URL? = nil) {
+        self.root = root ?? FileManager.default
+            .homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/projects", isDirectory: true)
+    }
+
+    var isAvailable: Bool {
+        FileManager.default.fileExists(atPath: root.path)
+    }
+
+    /// Scans for new transcript lines and summarizes the two windows.
+    ///
+    /// `sessionResetsAt` and `weekResetsAt` come from claude.ai's own limits. When
+    /// present the windows are pinned to them, so the token counts line up exactly
+    /// with the percentages shown above them. Without them the session window is
+    /// inferred from local activity the way Claude Code blocks it: the first
+    /// message of a block, floored to the hour, plus five hours.
+    func report(sessionResetsAt: Date?, weekResetsAt: Date?) -> TokenReport? {
+        guard isAvailable else { return nil }
+        scan()
+
+        let now = Date()
+
+        var sessionStart: Date?
+        var authoritative = false
+        if let resets = sessionResetsAt, resets > now {
+            sessionStart = resets.addingTimeInterval(-Self.sessionLength)
+            authoritative = true
+        } else {
+            sessionStart = inferredBlockStart(now: now)
+        }
+
+        let weekStart: Date? = {
+            if let resets = weekResetsAt, resets > now {
+                return resets.addingTimeInterval(-7 * 24 * 3600)
+            }
+            return now.addingTimeInterval(-7 * 24 * 3600)
+        }()
+
+        let sessionEvents = sessionStart.map { start in
+            events.filter { $0.date >= start && $0.date <= now }
+        } ?? []
+
+        let weekEvents = weekStart.map { start in
+            events.filter { $0.date >= start && $0.date <= now }
+        } ?? []
+
+        return TokenReport(
+            session: sessionEvents.reduce(TokenTotals()) { $0 + $1.totals },
+            sessionStart: sessionEvents.isEmpty ? nil : sessionStart,
+            sessionIsAuthoritative: authoritative,
+            week: weekEvents.reduce(TokenTotals()) { $0 + $1.totals },
+            weekStart: weekStart,
+            models: modelSplit(sessionEvents),
+            filesScanned: filesScanned,
+            generatedAt: now
+        )
+    }
+
+    private func modelSplit(_ events: [Event]) -> [ModelTokens] {
+        var byModel: [String: TokenTotals] = [:]
+        for e in events {
+            byModel[e.model, default: TokenTotals()] = byModel[e.model, default: TokenTotals()] + e.totals
+        }
+        return byModel
+            .map { ModelTokens(model: $0.key, totals: $0.value) }
+            .sorted { $0.totals.total > $1.totals.total }
+    }
+
+    /// Claude Code groups activity into 5-hour blocks that begin at the top of the
+    /// hour containing the block's first message. Replay the events to find the
+    /// block currently in progress; nil when the last block has already expired.
+    private func inferredBlockStart(now: Date) -> Date? {
+        let sorted = events.map(\.date).sorted()
+        guard let first = sorted.first else { return nil }
+
+        var start = floorToHour(first)
+        for date in sorted where date.timeIntervalSince(start) >= Self.sessionLength {
+            start = floorToHour(date)
+        }
+        guard now.timeIntervalSince(start) < Self.sessionLength else { return nil }
+        return start
+    }
+
+    private func floorToHour(_ date: Date) -> Date {
+        Calendar.current.date(
+            from: Calendar.current.dateComponents([.year, .month, .day, .hour], from: date)
+        ) ?? date
+    }
+
+    // MARK: - Scanning
+
+    private func scan() {
+        let fm = FileManager.default
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey, .creationDateKey]
+        guard let walker = fm.enumerator(at: root, includingPropertiesForKeys: keys,
+                                         options: [.skipsHiddenFiles, .skipsPackageDescendants])
+        else { return }
+
+        let cutoff = Date().addingTimeInterval(-Self.retention)
+        var budget = Self.byteBudgetPerScan
+        var count = 0
+
+        for case let url as URL in walker {
+            guard url.pathExtension == "jsonl" else { continue }
+            count += 1
+
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            let modified = values?.contentModificationDate ?? .distantPast
+            let created = values?.creationDate ?? .distantPast
+            let size = UInt64(values?.fileSize ?? 0)
+            let path = url.path
+
+            var cursor: Cursor
+            if let existing = cursors[path], existing.created == created, size >= existing.offset {
+                cursor = existing
+            } else if cursors[path] == nil && modified < cutoff {
+                // Never read, and untouched for longer than we retain. Nothing in
+                // it can land in a window. Mark it consumed so later appends are
+                // still picked up without ever reading its history.
+                cursors[path] = Cursor(offset: size, created: created)
+                continue
+            } else {
+                // New file, or one replaced/truncated under us: read from the top.
+                cursor = Cursor(offset: 0, created: created)
+            }
+
+            guard size > cursor.offset, budget > 0 else {
+                cursors[path] = cursor
+                continue
+            }
+            budget -= ingest(url: url, cursor: &cursor, budget: budget)
+            cursors[path] = cursor
+        }
+
+        filesScanned = count
+        prune()
+    }
+
+    /// Reads the bytes appended since `cursor.offset`, stopping at the last
+    /// complete line so a half-written record is re-read next scan rather than
+    /// dropped. Returns bytes consumed.
+    private func ingest(url: URL, cursor: inout Cursor, budget: Int) -> Int {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return 0 }
+        defer { try? handle.close() }
+
+        do { try handle.seek(toOffset: cursor.offset) } catch { return 0 }
+        guard let data = try? handle.read(upToCount: budget), !data.isEmpty else { return 0 }
+
+        // Trim to the final newline; the remainder is an incomplete line.
+        guard let lastNewline = data.lastIndex(of: 0x0A) else { return 0 }
+        let complete = data[data.startIndex...lastNewline]
+
+        for line in complete.split(separator: 0x0A, omittingEmptySubsequences: true) {
+            if let event = parse(line: Data(line)) {
+                events.append(event)
+                seen.insert(event.id)
+            }
+        }
+
+        cursor.offset += UInt64(complete.count)
+        return complete.count
+    }
+
+    private static let usageMarker = Data("\"usage\"".utf8)
+
+    private func parse(line: Data) -> Event? {
+        // Most lines are user turns, tool results, or metadata. Skip the JSON
+        // decode entirely unless a usage block is present.
+        guard line.range(of: Self.usageMarker) != nil else { return nil }
+
+        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              obj["type"] as? String == "assistant",
+              let message = obj["message"] as? [String: Any],
+              let usage = message["usage"] as? [String: Any]
+        else { return nil }
+
+        // Claude Code writes placeholder turns (model `<synthetic>`) that never
+        // hit the API and carry no real usage.
+        let model = (message["model"] as? String) ?? "unknown"
+        guard !model.hasPrefix("<") else { return nil }
+
+        // The same turn is written to every transcript that replays it (resumed
+        // sessions, sidechains). requestId is per API call and unique; message id
+        // is the fallback.
+        guard let id = (obj["requestId"] as? String) ?? (message["id"] as? String),
+              !seen.contains(id)
+        else { return nil }
+
+        guard let stamp = obj["timestamp"] as? String,
+              let date = ClaudeClient.parseISO8601(stamp)
+        else { return nil }
+
+        let totals = TokenTotals(
+            input: int(usage["input_tokens"]),
+            output: int(usage["output_tokens"]),
+            cacheCreation: int(usage["cache_creation_input_tokens"]),
+            cacheRead: int(usage["cache_read_input_tokens"]),
+            messages: 1
+        )
+        guard totals.total > 0 else { return nil }
+
+        return Event(id: id, date: date, model: model, totals: totals)
+    }
+
+    private func int(_ any: Any?) -> Int {
+        switch any {
+        case let i as Int: return i
+        case let n as NSNumber: return n.intValue
+        case let d as Double: return Int(d)
+        default: return 0
+        }
+    }
+
+    /// Drop events (and their dedupe keys) that have aged out of every window.
+    private func prune() {
+        let cutoff = Date().addingTimeInterval(-Self.retention)
+        guard events.contains(where: { $0.date < cutoff }) else { return }
+        var kept: [Event] = []
+        kept.reserveCapacity(events.count)
+        var keptIDs = Set<String>()
+        for event in events where event.date >= cutoff {
+            kept.append(event)
+            keptIDs.insert(event.id)
+        }
+        events = kept
+        seen = keptIDs
+    }
+}

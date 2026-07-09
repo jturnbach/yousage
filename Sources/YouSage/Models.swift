@@ -4,24 +4,159 @@ struct UsageSnapshot: Sendable, Equatable {
     var fetchedAt: Date
     var sections: [UsageSection]
     var rawJSON: String
+
+    /// The rolling 5-hour limit. Looked up by role rather than key, because the
+    /// same limit arrives as `five_hour` on older payloads and as a `limits`
+    /// entry on newer ones.
+    var sessionSection: UsageSection? {
+        sections.first { $0.kind == .session }
+    }
+
+    /// The weekly all-models limit, as opposed to a per-model weekly cap.
+    var weeklyAllSection: UsageSection? {
+        sections.first { $0.kind == .weekly && $0.rank == 1 }
+    }
 }
 
 struct UsageSection: Sendable, Identifiable, Equatable {
     let id: String
     let title: String
+    /// Percent consumed, 0–100. Always present: taken directly from a
+    /// utilization field for rate-limit metrics, or derived from
+    /// `used / limit` for allotment metrics.
     let percent: Double
+    /// Absolute amount consumed in this allotment (enterprise plans). nil for
+    /// rate-limit metrics that only report a percentage.
+    let used: Double?
+    /// Total allotment granted for the period. nil for rate-limit metrics.
+    let limit: Double?
+    /// Unit the amounts are expressed in — e.g. "tokens", "messages",
+    /// "credits", "USD". nil when unknown.
+    let unit: String?
+    /// When this metric's window resets (rate-limit) or the allotment renews
+    /// (enterprise billing period).
     let resetsAt: Date?
     let kind: Kind
     let infoNote: String?
+    /// False when claude.ai reported a limit YouSage has no built-in name for.
+    /// Such limits are still shown — that's how a newly-introduced limit (a
+    /// per-model weekly cap, say) appears without an app update.
+    let isRecognized: Bool
+    /// Display order within the popover. Lower sorts first.
+    let rank: Int
 
     enum Kind: String, Sendable, Equatable {
         case session
         case weekly
+        /// Enterprise / team allotted usage: a fixed allowance per billing
+        /// period, reported as an absolute used-of-total amount.
+        case allotment
+        /// Rate-limit shaped, but on a window we can't name from its key.
+        case other
+    }
+
+    /// True when this metric carries absolute used/limit amounts (enterprise
+    /// allotment) rather than only a rate-limit percentage.
+    var hasAllotment: Bool { limit != nil && (limit ?? 0) > 0 }
+
+    /// Human "used / total unit" string for allotment metrics, else nil so the
+    /// caller falls back to the plain percent label.
+    var allotmentText: String? {
+        guard hasAllotment, let limit else { return nil }
+        let u = NumberFormat.amount(used ?? 0, unit: unit)
+        let l = NumberFormat.amount(limit, unit: unit)
+        return "\(u) / \(l)"
+    }
+
+    /// Remaining allowance string ("1.2M tokens left"), else nil.
+    var remainingText: String? {
+        guard hasAllotment, let limit else { return nil }
+        let left = max(0, limit - (used ?? 0))
+        return "\(NumberFormat.amount(left, unit: unit)) left"
+    }
+}
+
+// MARK: - Number formatting
+
+enum NumberFormat {
+    /// Compact human formatting. Money units render as currency; large counts
+    /// collapse to K/M/B; the unit (if any) is appended.
+    static func amount(_ value: Double, unit: String?) -> String {
+        let u = (unit ?? "").lowercased()
+        let isMoney = u == "usd" || u == "$" || u == "dollars" || u.contains("dollar")
+        if isMoney {
+            // Cents below $1000, compacted above it. The threshold matches where
+            // compact() starts collapsing, so both halves of a "used / limit"
+            // pair always render the same way — never "$40.00 / $100".
+            return "$" + compact(value, forceDecimals: Swift.abs(value) < 1_000)
+        }
+        let suffix = (unit?.isEmpty == false) ? " \(unit!)" : ""
+        return compact(value) + suffix
+    }
+
+    static func tokens(_ value: Int) -> String { compact(Double(value)) }
+
+    static func compact(_ value: Double, forceDecimals: Bool = false) -> String {
+        let abs = Swift.abs(value)
+        switch abs {
+        case 1_000_000_000...:
+            return trim(value / 1_000_000_000) + "B"
+        case 1_000_000...:
+            return trim(value / 1_000_000) + "M"
+        case 1_000...:
+            return trim(value / 1_000) + "K"
+        default:
+            if forceDecimals { return String(format: "%.2f", value) }
+            return trim(value)
+        }
+    }
+
+    private static func trim(_ value: Double) -> String {
+        if value == value.rounded() && Swift.abs(value) < 1_000 {
+            return String(Int(value.rounded()))
+        }
+        return String(format: "%.1f", value)
+    }
+}
+
+// MARK: - Plan
+
+/// How YouSage decides which usage shape to present. `auto` reads it off the
+/// `/usage` payload, which is unambiguous: allotment amounts mean a
+/// seat/credit plan, bare utilization percentages mean a subscription.
+enum PlanMode: String, CaseIterable, Sendable, Identifiable {
+    case auto
+    case subscription
+    case enterprise
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .auto:         return "Automatic"
+        case .subscription: return "Subscription"
+        case .enterprise:   return "Enterprise"
+        }
+    }
+}
+
+enum DetectedPlan: String, Sendable, Equatable {
+    case subscription
+    case enterprise
+    case unknown
+
+    var displayName: String {
+        switch self {
+        case .subscription: return "Subscription (Pro / Max)"
+        case .enterprise:   return "Enterprise / Team"
+        case .unknown:      return "Unknown"
+        }
     }
 }
 
 enum MenuBarMetric: String, CaseIterable, Sendable, Identifiable {
     case highest
+    case allotment
     case session
     case weekly
 
@@ -29,11 +164,79 @@ enum MenuBarMetric: String, CaseIterable, Sendable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .highest: return "Highest of all limits"
-        case .session: return "Current session (5 hr)"
-        case .weekly:  return "Weekly · All models"
+        case .highest:   return "Highest of all limits"
+        case .allotment: return "Allotted usage"
+        case .session:   return "Current session (5 hr)"
+        case .weekly:    return "Weekly · All models"
         }
     }
+}
+
+// MARK: - Token tracking
+
+/// Token counts summed from local Claude Code transcripts.
+struct TokenTotals: Sendable, Equatable {
+    var input = 0
+    var output = 0
+    var cacheCreation = 0
+    var cacheRead = 0
+    var messages = 0
+
+    var total: Int { input + output + cacheCreation + cacheRead }
+    var cache: Int { cacheCreation + cacheRead }
+    var isEmpty: Bool { messages == 0 }
+
+    static func + (a: TokenTotals, b: TokenTotals) -> TokenTotals {
+        TokenTotals(input: a.input + b.input,
+                    output: a.output + b.output,
+                    cacheCreation: a.cacheCreation + b.cacheCreation,
+                    cacheRead: a.cacheRead + b.cacheRead,
+                    messages: a.messages + b.messages)
+    }
+
+    /// "in 12K · out 48K · cache 1.3M" — cache folded into one number because
+    /// the creation/read split isn't actionable at a glance.
+    var breakdown: String {
+        "in \(NumberFormat.tokens(input)) · out \(NumberFormat.tokens(output)) · cache \(NumberFormat.tokens(cache))"
+    }
+}
+
+struct ModelTokens: Sendable, Equatable, Identifiable {
+    let model: String
+    let totals: TokenTotals
+    var id: String { model }
+
+    /// `claude-opus-4-8` → `Opus 4.8`; unknown ids pass through lightly cleaned.
+    var displayName: String {
+        var s = model
+        for p in ["claude-", "anthropic."] where s.hasPrefix(p) { s = String(s.dropFirst(p.count)) }
+        // Trailing date stamps (`-20251001`) carry no meaning for a human here.
+        let parts = s.split(separator: "-")
+            .map(String.init)
+            .filter { !($0.count == 8 && $0.allSatisfy(\.isNumber)) }
+        guard let family = parts.first else { return model }
+        let version = parts.dropFirst().joined(separator: ".")
+        let name = family.prefix(1).uppercased() + family.dropFirst()
+        return version.isEmpty ? name : "\(name) \(version)"
+    }
+}
+
+struct TokenReport: Sendable, Equatable {
+    /// Totals inside the active 5-hour window. Empty when no window is active.
+    let session: TokenTotals
+    /// Start of the active 5-hour window, nil when there's no recent activity.
+    let sessionStart: Date?
+    /// True when `sessionStart` was pinned to claude.ai's own `five_hour`
+    /// reset time rather than inferred from local timestamps.
+    let sessionIsAuthoritative: Bool
+    let week: TokenTotals
+    let weekStart: Date?
+    /// Per-model split for the session window, largest first.
+    let models: [ModelTokens]
+    let filesScanned: Int
+    let generatedAt: Date
+
+    var hasAnyData: Bool { !week.isEmpty || !session.isEmpty }
 }
 
 enum ClaudeError: Error, Sendable {

@@ -201,24 +201,24 @@ struct TokenTotals: Sendable, Equatable {
     }
 }
 
+/// `claude-opus-4-8` → `Opus 4.8`. Normalizes first, so provider prefixes,
+/// bracketed variants, and date stamps all fall away before formatting.
+func modelDisplayName(_ id: String) -> String {
+    var s = Pricing.normalize(id)
+    if s.hasPrefix("claude-") { s = String(s.dropFirst("claude-".count)) }
+    let parts = s.split(separator: "-").map(String.init)
+    guard let family = parts.first, !family.isEmpty else { return id }
+    let version = parts.dropFirst().joined(separator: ".")
+    let name = family.prefix(1).uppercased() + family.dropFirst()
+    return version.isEmpty ? name : "\(name) \(version)"
+}
+
 struct ModelTokens: Sendable, Equatable, Identifiable {
     let model: String
     let totals: TokenTotals
     var id: String { model }
 
-    /// `claude-opus-4-8` → `Opus 4.8`; unknown ids pass through lightly cleaned.
-    var displayName: String {
-        var s = model
-        for p in ["claude-", "anthropic."] where s.hasPrefix(p) { s = String(s.dropFirst(p.count)) }
-        // Trailing date stamps (`-20251001`) carry no meaning for a human here.
-        let parts = s.split(separator: "-")
-            .map(String.init)
-            .filter { !($0.count == 8 && $0.allSatisfy(\.isNumber)) }
-        guard let family = parts.first else { return model }
-        let version = parts.dropFirst().joined(separator: ".")
-        let name = family.prefix(1).uppercased() + family.dropFirst()
-        return version.isEmpty ? name : "\(name) \(version)"
-    }
+    var displayName: String { modelDisplayName(model) }
 }
 
 /// What a window's tokens would cost at Anthropic's API list prices. YouSage is

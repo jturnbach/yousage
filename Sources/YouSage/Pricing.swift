@@ -73,7 +73,8 @@ enum Pricing {
     /// Anchoring both edges keeps `claude-opus-7-0` (a future release) matching
     /// while rejecting `claude-3-opus` (a past generation that priced
     /// differently) and `claude-opusglobular` (not a model at all).
-    private static func isFamily(_ family: String, of id: String) -> Bool {
+    /// Also used by `ModelFamily` so a model is coloured the same way it is priced.
+    static func isFamily(_ family: String, of id: String) -> Bool {
         let stem = "claude-\(family)"
         return id == stem || id.hasPrefix("\(stem)-")
     }

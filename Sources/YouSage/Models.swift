@@ -221,6 +221,25 @@ struct ModelTokens: Sendable, Equatable, Identifiable {
     }
 }
 
+/// What a window's tokens would cost at Anthropic's API list prices. YouSage is
+/// a subscription tool — nobody is billed for these. The number answers "what
+/// would this have cost per-token?", which is curiosity, not accounting.
+struct CostEstimate: Sendable, Equatable {
+    /// Dollars across every event whose model could be priced.
+    var amount: Double = 0
+    /// Models seen in the window but absent from the rate table. A non-empty
+    /// list means `amount` is an undercount, and `display` says so.
+    var unpricedModels: [String] = []
+
+    var isComplete: Bool { unpricedModels.isEmpty }
+
+    /// "$4.12", or "≥ $27.60" when some of the window couldn't be priced.
+    var display: String {
+        let money = NumberFormat.amount(amount, unit: "USD")
+        return isComplete ? money : "≥ \(money)"
+    }
+}
+
 struct TokenReport: Sendable, Equatable {
     /// Totals inside the active 5-hour window. Empty when no window is active.
     let session: TokenTotals
@@ -229,8 +248,10 @@ struct TokenReport: Sendable, Equatable {
     /// True when `sessionStart` was pinned to claude.ai's own `five_hour`
     /// reset time rather than inferred from local timestamps.
     let sessionIsAuthoritative: Bool
+    let sessionCost: CostEstimate
     let week: TokenTotals
     let weekStart: Date?
+    let weekCost: CostEstimate
     /// Per-model split for the session window, largest first.
     let models: [ModelTokens]
     let filesScanned: Int

@@ -95,8 +95,10 @@ actor TokenTracker {
             session: sessionEvents.reduce(TokenTotals()) { $0 + $1.totals },
             sessionStart: sessionEvents.isEmpty ? nil : sessionStart,
             sessionIsAuthoritative: authoritative,
+            sessionCost: costEstimate(sessionEvents),
             week: weekEvents.reduce(TokenTotals()) { $0 + $1.totals },
             weekStart: weekStart,
+            weekCost: costEstimate(weekEvents),
             models: modelSplit(sessionEvents),
             filesScanned: filesScanned,
             generatedAt: now
@@ -111,6 +113,23 @@ actor TokenTracker {
         return byModel
             .map { ModelTokens(model: $0.key, totals: $0.value) }
             .sorted { $0.totals.total > $1.totals.total }
+    }
+
+    /// Prices a window event-by-event, because the rate depends on which model
+    /// produced each turn. Models missing from the table are collected rather
+    /// than counted as zero.
+    private func costEstimate(_ events: [Event]) -> CostEstimate {
+        var estimate = CostEstimate()
+        var unpriced: Set<String> = []
+        for event in events {
+            if let dollars = Pricing.cost(event.totals, model: event.model) {
+                estimate.amount += dollars
+            } else {
+                unpriced.insert(event.model)
+            }
+        }
+        estimate.unpricedModels = unpriced.sorted()
+        return estimate
     }
 
     /// Claude Code groups activity into 5-hour blocks that begin at the top of the

@@ -133,7 +133,14 @@ final class AppState: ObservableObject {
         guard enabled != tokenTrackingEnabled else { return }
         tokenTrackingEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: Self.tokensKey)
-        if enabled { refreshTokens(force: true) } else { tokenReport = nil }
+        if enabled {
+            refreshTokens(force: true)
+        } else {
+            // Both are derived from the same transcripts. Clearing one and not
+            // the other would leave a stale chart behind a switched-off feature.
+            tokenReport = nil
+            usageBreakdown = nil
+        }
     }
 
     var highestPercent: Double? {

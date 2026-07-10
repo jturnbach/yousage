@@ -44,15 +44,6 @@ struct TrendChart: View {
                 RuleMark(x: .value("Day", selected.day, unit: .day))
                     .foregroundStyle(.quaternary)
                     .zIndex(-1)
-                    // The rule spans the whole plot, so `.top` anchors at the
-                    // plot's ceiling and the annotation lands outside it. Clamp
-                    // both axes to the chart or the tooltip is cropped by the
-                    // card above — which is exactly what happened.
-                    .annotation(position: .top, spacing: 4,
-                                overflowResolution: .init(x: .fit(to: .chart),
-                                                          y: .fit(to: .chart))) {
-                        DayTooltip(day: selected)
-                    }
             }
         }
         .chartForegroundStyleScale(
@@ -85,9 +76,32 @@ struct TrendChart: View {
                 RoundedRectangle(cornerRadius: 8).fill(.background.opacity(0.4))
             )
         }
+        // The tooltip rides on top of the chart rather than hanging off the
+        // rule as an annotation. An annotation on a full-height RuleMark anchors
+        // at the plot's ceiling, so it either overflows the card or — once
+        // clamped — draws underneath the plot, because the rule sits at
+        // zIndex(-1). An overlay is above everything and clamps to the plot.
+        .chartOverlay { proxy in
+            GeometryReader { geo in
+                if let selected, let anchor = proxy.plotFrame {
+                    let plot = geo[anchor]
+                    let centre = plot.minX + (proxy.position(forX: selected.day) ?? 0)
+                    let x = min(max(centre - Self.tooltipWidth / 2, plot.minX + 4),
+                                plot.maxX - Self.tooltipWidth - 4)
+                    DayTooltip(day: selected)
+                        .frame(width: Self.tooltipWidth, alignment: .leading)
+                        .offset(x: x, y: plot.minY + 6)
+                }
+            }
+            // Never swallow the hover that produced the selection.
+            .allowsHitTesting(false)
+        }
         .chartLegend(position: .bottom, alignment: .leading, spacing: 12)
         .frame(minHeight: 220)
     }
+
+    /// Fixed, so the horizontal clamp can be computed before layout.
+    private static let tooltipWidth: CGFloat = 210
 }
 
 /// The trend chart is the one place values hide inside stacked segments, so it is
@@ -119,7 +133,6 @@ private struct DayTooltip: View {
         .font(.caption)
         .padding(10)
         .glassSurface(cornerRadius: 10)
-        .fixedSize()
     }
 }
 

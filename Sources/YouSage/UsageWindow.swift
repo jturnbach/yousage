@@ -1,8 +1,10 @@
+import AppKit
 import SwiftUI
 
 struct UsageWindow: View {
     @ObservedObject private var state = AppState.shared
     @State private var showTable = false
+    @State private var exportError: String?
 
     var body: some View {
         Group {
@@ -24,10 +26,10 @@ struct UsageWindow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let breakdown = state.usageBreakdown {
                 if breakdown.totals.messages == 0 {
-                    message("No activity in the last 7 days",
+                    message("No activity in the last \(breakdown.range.days) days",
                             "Nothing in ~/.claude/projects falls inside this window.") { EmptyView() }
                 } else {
-                    content(breakdown)
+                    dashboard(breakdown)
                 }
             } else {
                 message("No Claude Code transcripts found",
@@ -35,9 +37,258 @@ struct UsageWindow: View {
                         + "claude.ai draw down the same limits but leave nothing here.") { EmptyView() }
             }
         }
-        .frame(minWidth: 640, minHeight: 520)
+        .frame(minWidth: 720, minHeight: 560)
+        .navigationTitle("Usage")
+        .navigationSubtitle(state.usageBreakdown.map(Self.dateRange) ?? "")
+        .toolbar { toolbar }
+        .alert("Couldn't export", isPresented: .constant(exportError != nil)) {
+            Button("OK") { exportError = nil }
+        } message: {
+            Text(exportError ?? "")
+        }
         .task { state.refresh() }
     }
+
+    // MARK: - Toolbar
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .primaryAction) {
+            Picker("Range", selection: Binding(get: { state.usageRange },
+                                               set: { state.setUsageRange($0) })) {
+                ForEach(UsageRange.allCases) { range in
+                    Text(range.label).tag(range)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("How far back to look")
+        }
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                export()
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.down")
+            }
+            .disabled(state.usageBreakdown == nil)
+            .help("Save this range as a CSV")
+        }
+    }
+
+    /// "Jul 7 – Jul 13" — the span actually drawn, so the subtitle can never
+    /// disagree with the chart.
+    private static func dateRange(_ breakdown: UsageBreakdown) -> String {
+        guard let first = breakdown.days.first?.day, let last = breakdown.days.last?.day else {
+            return ""
+        }
+        let f = Date.FormatStyle.dateTime.month(.abbreviated).day()
+        return "\(first.formatted(f)) – \(last.formatted(f))"
+    }
+
+    // MARK: - Page
+
+    private func dashboard(_ breakdown: UsageBreakdown) -> some View {
+        ScrollView {
+            GlassGroup(spacing: 12) {
+                VStack(spacing: 12) {
+                    hero(breakdown)
+                    trendCard(breakdown)
+                    WeightedHStack(weights: [1.5, 1], spacing: 12) {
+                        DashCard(title: "Cost by model",
+                                 padding: EdgeInsets(top: 15, leading: 18, bottom: 15, trailing: 18)) {
+                            CostByModelList(models: breakdown.models,
+                                            totalCost: breakdown.cost.amount)
+                        }
+                        VStack(spacing: 12) {
+                            projectionCard(breakdown.month)
+                            cacheCard(breakdown)
+                            if let budget = state.monthlyBudget {
+                                budgetCard(spent: breakdown.month.spendToDate, budget: budget)
+                            }
+                        }
+                    }
+                    DashCard(title: "Token kind",
+                             padding: EdgeInsets(top: 15, leading: 18, bottom: 15, trailing: 18)) {
+                        TokenKindList(kinds: breakdown.kinds)
+                    }
+
+                    if !breakdown.cost.isComplete {
+                        Text("Costs exclude \(breakdown.cost.unpricedModels.joined(separator: ", ")) — "
+                             + "no list price is known for "
+                             + "\(breakdown.cost.unpricedModels.count == 1 ? "it" : "them"). "
+                             + "Totals are lower bounds.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .padding(EdgeInsets(top: 18, leading: 20, bottom: 20, trailing: 20))
+        }
+    }
+
+    // MARK: - Hero
+
+    private func hero(_ breakdown: UsageBreakdown) -> some View {
+        WeightedHStack(weights: [1.45, 1, 1], spacing: 12) {
+            DashCard {
+                CardLabel(text: "Total tokens") {
+                    if let change = breakdown.tokenChange { TrendChip.volume(change) }
+                }
+                MetricValue(text: NumberFormat.tokens(breakdown.totals.total), size: 31)
+                    .padding(.top, 5)
+                CardFootnote(text: previousTokens(breakdown))
+                    .padding(.top, 6)
+            }
+            DashCard {
+                CardLabel("API list cost")
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    MetricValue(text: breakdown.cost.exactDisplay, size: 24)
+                    if let change = breakdown.costChange { TrendChip.cost(change, small: true) }
+                }
+                .padding(.top, 5)
+                CardFootnote(text: costPerMessage(breakdown))
+                    .padding(.top, 8)
+            }
+            DashCard {
+                CardLabel("Messages")
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                    MetricValue(text: breakdown.totals.messages.formatted(.number), size: 24)
+                    if let change = breakdown.messageChange {
+                        TrendChip.volume(change, small: true)
+                    }
+                }
+                .padding(.top, 5)
+                CardFootnote(text: "\(breakdown.messagesPerDay.formatted(.number)) / day avg")
+                    .padding(.top, 8)
+            }
+        }
+        // The tallest card sets the strip's height; without this the two narrow
+        // cards would each shrink to their own content and break the top line.
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Says what the chip is a percentage *of*. Without the previous figure, "▲18%"
+    /// is a number with no denominator.
+    private func previousTokens(_ breakdown: UsageBreakdown) -> String {
+        guard let previous = breakdown.previous else {
+            return "no activity in the previous \(breakdown.range.days) days"
+        }
+        return "vs. \(NumberFormat.tokens(previous.totals.total)) "
+             + "previous \(breakdown.range.days) days"
+    }
+
+    private func costPerMessage(_ breakdown: UsageBreakdown) -> String {
+        guard let each = breakdown.costPerMessage else { return "no messages" }
+        return String(format: "$%.3f / message", each)
+    }
+
+    // MARK: - Trend
+
+    private func trendCard(_ breakdown: UsageBreakdown) -> some View {
+        DashCard(padding: EdgeInsets(top: 15, leading: 18, bottom: 12, trailing: 18)) {
+            HStack(spacing: 14) {
+                Text("Tokens per day")
+                    .font(.system(size: 14, weight: .semibold))
+                    .tracking(-0.14)
+                Spacer(minLength: 8)
+                ModelLegend(families: families(in: breakdown))
+                Picker("View", selection: $showTable) {
+                    Image(systemName: "chart.xyaxis.line").tag(false)
+                    Image(systemName: "tablecells").tag(true)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help(showTable ? "Show the chart" : "Show the numbers")
+            }
+
+            if showTable {
+                DayTable(days: breakdown.days, families: families(in: breakdown))
+            } else {
+                TrendChart(days: breakdown.days)
+            }
+        }
+    }
+
+    /// Only families that actually appear, in declaration order, so neither the
+    /// legend nor the table advertises a model you never ran.
+    private func families(in breakdown: UsageBreakdown) -> [ModelFamily] {
+        ModelFamily.allCases.filter { family in
+            breakdown.days.contains { $0.byFamily.contains { $0.family == family } }
+        }
+    }
+
+    // MARK: - Right column
+
+    private func projectionCard(_ month: MonthProjection) -> some View {
+        DashCard(tinted: true) {
+            CardLabel("Projected month-end")
+            MetricValue(text: money(month.projected), size: 27)
+                .padding(.top, 4)
+            if let change = month.projectedChange {
+                TrendChip.cost(change, suffix: "vs. \(month.previousName)", small: true)
+                    .padding(.top, 9)
+            } else {
+                CardFootnote(text: "at \(money(month.spendToDate)) so far this month")
+                    .padding(.top, 9)
+            }
+        }
+    }
+
+    private func cacheCard(_ breakdown: UsageBreakdown) -> some View {
+        DashCard(padding: EdgeInsets(top: 13, leading: 16, bottom: 13, trailing: 16)) {
+            CardLabel("Cache hit rate")
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                MetricValue(text: breakdown.cacheHitRate.map { String(format: "%.1f%%", $0 * 100) }
+                            ?? "—", size: 21)
+                if let change = breakdown.cacheHitRateChange {
+                    TrendChip.volume(change, small: true)
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private func budgetCard(spent: Double, budget: Double) -> some View {
+        DashCard(padding: EdgeInsets(top: 13, leading: 16, bottom: 13, trailing: 16)) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Monthly budget")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 8)
+                Text("\(money(spent)) / \(money(budget))")
+                    .font(.system(size: 12, weight: .semibold))
+                    .monospacedDigit()
+            }
+            Meter(fraction: spent / budget,
+                  fill: LinearGradient(colors: [Color(hex: 0xE0855F), Color(hex: 0xC9694A)],
+                                       startPoint: .leading, endPoint: .trailing))
+                .padding(.top, 8)
+        }
+    }
+
+    /// Whole dollars, grouped: the projection and the budget are both estimates at
+    /// a scale where cents are noise, and "$2,042" is the figure a person repeats.
+    private func money(_ value: Double) -> String {
+        value.formatted(.currency(code: "USD").precision(.fractionLength(0)))
+    }
+
+    // MARK: - Export
+
+    private func export() {
+        guard let breakdown = state.usageBreakdown else { return }
+        do {
+            if let url = try UsageExport.save(breakdown) {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+
+    // MARK: - States
 
     /// Generic over the action view rather than taking a defaulted opaque type —
     /// `@ViewBuilder action: () -> some View = { EmptyView() }` does not compile.
@@ -54,124 +305,5 @@ struct UsageWindow: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(40)
-    }
-
-    @ViewBuilder
-    private func content(_ breakdown: UsageBreakdown) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                header(breakdown)
-
-                if showTable {
-                    UsageTable(breakdown: breakdown)
-                } else {
-                    // One container, so the three panes blend at their edges
-                    // instead of stacking as separate sheets.
-                    GlassGroup(spacing: 16) {
-                        VStack(spacing: 16) {
-                            GlassCard(title: "Tokens per day") {
-                                TrendChart(days: breakdown.days)
-                            }
-                            HStack(alignment: .top, spacing: 16) {
-                                GlassCard(title: "Cost by model") {
-                                    CostByModelChart(models: breakdown.models)
-                                }
-                                GlassCard(title: "Token kind") {
-                                    TokenKindChart(kinds: breakdown.kinds)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !breakdown.cost.isComplete {
-                    Text("Costs exclude \(breakdown.cost.unpricedModels.joined(separator: ", ")) — "
-                         + "no list price is known for \(breakdown.cost.unpricedModels.count == 1 ? "it" : "them"). "
-                         + "Totals are lower bounds.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(20)
-        }
-    }
-
-    private func header(_ breakdown: UsageBreakdown) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                kpi(NumberFormat.tokens(breakdown.totals.total), "tokens")
-                kpi(breakdown.cost.display, "at API list prices")
-                // Grouped, not compacted: message counts are human-scale, and
-                // "1.9K messages" throws away a digit nobody asked us to hide.
-                kpi(breakdown.totals.messages.formatted(.number), "messages")
-                Spacer()
-                Picker("", selection: $showTable) {
-                    Image(systemName: "chart.bar.xaxis").tag(false)
-                    Image(systemName: "tablecells").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
-            }
-            // The popover's "Last 7 days" is a rolling window pinned to claude.ai's
-            // reset. This window is calendar days. The labels keep them apart.
-            Text("last 7 calendar days")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-    }
-
-    private func kpi(_ value: String, _ label: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(value)
-                .font(.system(size: 26, weight: .semibold, design: .rounded))
-            Text(label).font(.caption).foregroundStyle(.secondary)
-        }
-        .padding(.trailing, 26)
-    }
-}
-
-/// The accessible twin every chart is supposed to have, and the place to read
-/// exact numbers rather than approximate a bar's length.
-private struct UsageTable: View {
-    let breakdown: UsageBreakdown
-
-    var body: some View {
-        GlassGroup(spacing: 16) {
-            VStack(alignment: .leading, spacing: 16) {
-            GlassCard(title: "By day") {
-                Table(breakdown.days) {
-                    TableColumn("Day") { day in
-                        Text(day.day, format: .dateTime.weekday(.wide).month().day())
-                            + Text(day.isToday ? " (so far)" : "")
-                    }
-                    TableColumn("Models") { day in
-                        Text(day.byFamily.map(\.family.displayName).joined(separator: ", "))
-                    }
-                    TableColumn("Tokens") { day in
-                        Text(NumberFormat.tokens(day.totals.total)).monospacedDigit()
-                    }
-                    TableColumn("Cost") { day in
-                        Text(day.cost.display).monospacedDigit()
-                    }
-                }
-                .frame(minHeight: 200)
-                .scrollContentBackground(.hidden)
-            }
-            GlassCard(title: "By model") {
-                Table(breakdown.models) {
-                    TableColumn("Model", value: \.displayName)
-                    TableColumn("Tokens") { m in
-                        Text(NumberFormat.tokens(m.totals.total)).monospacedDigit()
-                    }
-                    TableColumn("Cost") { m in
-                        Text(m.cost.display).monospacedDigit()
-                    }
-                }
-                .frame(minHeight: 120)
-                .scrollContentBackground(.hidden)
-            }
-            }
-        }
     }
 }

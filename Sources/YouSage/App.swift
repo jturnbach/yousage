@@ -22,10 +22,12 @@ struct YouSageApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Window("Usage Details", id: "usage") {
+        Window("Usage", id: "usage") {
             UsageWindow()
         }
-        .defaultSize(width: 760, height: 640)
+        // The design's comfortable content width, plus the room the toolbar's
+        // range control and Export button need beside the title.
+        .defaultSize(width: 860, height: 720)
 
         Window("YouSage Settings", id: "settings") {
             SettingsView()

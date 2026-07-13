@@ -99,10 +99,54 @@ struct KindTotal: Sendable, Equatable, Identifiable {
     var id: TokenKind { kind }
 }
 
-/// Seven calendar days of usage, sliced three ways. A tuple would be lighter than
-/// `KindTotal`, but tuples do not synthesize `Equatable` and SwiftUI needs that.
+/// How far back the details window looks. Raw value is the day count, so the
+/// label and the arithmetic never drift apart.
+enum UsageRange: Int, Sendable, CaseIterable, Identifiable {
+    case week = 7, month = 30, quarter = 90
+
+    var days: Int { rawValue }
+    var label: String { "\(rawValue)D" }
+    var id: Int { rawValue }
+}
+
+/// The equal-length window immediately before the current one, for the trend
+/// chips. Every field is a total: the previous period is never charted, only
+/// compared against.
+struct PeriodTotals: Sendable, Equatable {
+    let totals: TokenTotals
+    let cost: CostEstimate
+    /// nil when the window sent nothing to a model, matching `cacheHitRate`.
+    let cacheHitRate: Double?
+}
+
+/// Where this calendar month is heading at the rate it has been going.
+///
+/// Deliberately a calendar month rather than the selected range: a projection is
+/// only meaningful against the period it projects onto, and a bill is monthly.
+struct MonthProjection: Sendable, Equatable {
+    /// Dollars spent since the first of the month.
+    let spendToDate: Double
+    /// `spendToDate` extrapolated over the whole month at the current rate.
+    let projected: Double
+    /// Last calendar month's total. nil when it held no activity — which,
+    /// this far back, is indistinguishable from never having scanned it.
+    let previousCost: Double?
+    /// "June" — named, because "vs. previous month" reads like a chart axis.
+    let previousName: String
+
+    /// Fraction change of the projection against last month, or nil when there
+    /// is nothing to compare with.
+    var projectedChange: Double? {
+        guard let previousCost, previousCost > 0 else { return nil }
+        return (projected - previousCost) / previousCost
+    }
+}
+
+/// A range of calendar days of usage, sliced three ways, plus the comparisons the
+/// dashboard's chips need. A tuple would be lighter than `KindTotal`, but tuples
+/// do not synthesize `Equatable` and SwiftUI needs that.
 struct UsageBreakdown: Sendable, Equatable {
-    /// Exactly `dayCount` entries, oldest first, zero-filled.
+    /// Exactly `range.days` entries, oldest first, zero-filled.
     let days: [DayUsage]
     /// Cost descending, then tokens descending, then name — so the order is total.
     let models: [ModelCost]
@@ -110,7 +154,52 @@ struct UsageBreakdown: Sendable, Equatable {
     let kinds: [KindTotal]
     let totals: TokenTotals
     let cost: CostEstimate
+    let range: UsageRange
+    /// nil when the preceding window was idle. A change from zero is not a
+    /// percentage, so the chips must be able to say nothing at all.
+    let previous: PeriodTotals?
+    let month: MonthProjection
     let generatedAt: Date
+
+    /// Cache reads as a share of everything sent *to* the model. Output tokens are
+    /// generated, never read from a cache, so they are not in the denominator.
+    /// nil when nothing was sent.
+    var cacheHitRate: Double? { Self.cacheHitRate(of: totals) }
+
+    var tokenChange: Double? {
+        Self.change(Double(totals.total), from: previous.map { Double($0.totals.total) })
+    }
+    var costChange: Double? {
+        Self.change(cost.amount, from: previous?.cost.amount)
+    }
+    var messageChange: Double? {
+        Self.change(Double(totals.messages), from: previous.map { Double($0.totals.messages) })
+    }
+    var cacheHitRateChange: Double? {
+        Self.change(cacheHitRate, from: previous?.cacheHitRate)
+    }
+
+    /// Dollars per message, or nil when the window has no messages to divide by.
+    var costPerMessage: Double? {
+        totals.messages > 0 ? cost.amount / Double(totals.messages) : nil
+    }
+
+    /// Messages per day, averaged across the whole range including idle days —
+    /// the range is the window the user chose, so it is the window we average over.
+    var messagesPerDay: Int {
+        days.isEmpty ? 0 : Int((Double(totals.messages) / Double(days.count)).rounded())
+    }
+
+    static func cacheHitRate(of totals: TokenTotals) -> Double? {
+        let sent = totals.input + totals.cacheCreation + totals.cacheRead
+        guard sent > 0 else { return nil }
+        return Double(totals.cacheRead) / Double(sent)
+    }
+
+    private static func change(_ current: Double?, from previous: Double?) -> Double? {
+        guard let current, let previous, previous > 0 else { return nil }
+        return (current - previous) / previous
+    }
 }
 
 extension UsageBreakdown {
@@ -123,14 +212,8 @@ extension UsageBreakdown {
     static func make(from events: [UsageEvent],
                      now: Date,
                      calendar: Calendar,
-                     dayCount: Int = 7) -> UsageBreakdown {
-        let emptyKinds = TokenKind.allCases.map { KindTotal(kind: $0, count: 0) }
-        guard dayCount > 0 else {
-            return UsageBreakdown(days: [], models: [], kinds: emptyKinds,
-                                  totals: TokenTotals(), cost: CostEstimate(),
-                                  generatedAt: now)
-        }
-
+                     range: UsageRange = .week) -> UsageBreakdown {
+        let dayCount = range.days
         let today = calendar.startOfDay(for: now)
         let dayStarts: [Date] = (0..<dayCount).reversed().compactMap {
             calendar.date(byAdding: .day, value: -$0, to: today)
@@ -190,7 +273,78 @@ extension UsageBreakdown {
                               kinds: kinds,
                               totals: totals,
                               cost: estimate(over: perModel),
+                              range: range,
+                              previous: previousPeriod(in: events, before: spanStart,
+                                                       dayCount: dayCount, calendar: calendar),
+                              month: projectMonth(from: events, now: now, calendar: calendar),
                               generatedAt: now)
+    }
+
+    /// The equal-length window ending where the drawn one begins. Returns nil when
+    /// it is empty, so a chip never divides by zero and never claims an infinite
+    /// rise off a period we may simply never have scanned.
+    private static func previousPeriod(in events: [UsageEvent],
+                                       before spanStart: Date,
+                                       dayCount: Int,
+                                       calendar: Calendar) -> PeriodTotals? {
+        guard let start = calendar.date(byAdding: .day, value: -dayCount, to: spanStart) else {
+            return nil
+        }
+        var perModel: [String: TokenTotals] = [:]
+        for e in events where e.date >= start && e.date < spanStart {
+            perModel[e.model] = (perModel[e.model] ?? TokenTotals()) + e.totals
+        }
+        guard !perModel.isEmpty else { return nil }
+
+        let totals = perModel.values.reduce(TokenTotals()) { $0 + $1 }
+        return PeriodTotals(totals: totals,
+                            cost: estimate(over: perModel),
+                            cacheHitRate: cacheHitRate(of: totals))
+    }
+
+    /// Spend so far this calendar month, extrapolated to its end at the same rate.
+    ///
+    /// The elapsed fraction is measured in seconds rather than days, so the figure
+    /// climbs smoothly through the day instead of stepping at midnight — and so a
+    /// 23- or 25-hour DST day scales by what it actually was.
+    private static func projectMonth(from events: [UsageEvent],
+                                     now: Date,
+                                     calendar: Calendar) -> MonthProjection {
+        let monthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: now))
+            ?? calendar.startOfDay(for: now)
+        let monthEnd = calendar.date(byAdding: .month, value: 1, to: monthStart) ?? now
+        let previousStart = calendar.date(byAdding: .month, value: -1, to: monthStart) ?? monthStart
+
+        var thisMonth: [String: TokenTotals] = [:]
+        var lastMonth: [String: TokenTotals] = [:]
+        for e in events {
+            if e.date >= monthStart && e.date < monthEnd {
+                thisMonth[e.model] = (thisMonth[e.model] ?? TokenTotals()) + e.totals
+            } else if e.date >= previousStart && e.date < monthStart {
+                lastMonth[e.model] = (lastMonth[e.model] ?? TokenTotals()) + e.totals
+            }
+        }
+
+        let spendToDate = estimate(over: thisMonth).amount
+        let elapsed = now.timeIntervalSince(monthStart)
+        let whole = monthEnd.timeIntervalSince(monthStart)
+        // Guard the first instant of the month, where the rate is 0/0.
+        let fraction = whole > 0 ? max(elapsed / whole, 1e-6) : 1
+
+        let previousName = monthName(previousStart, calendar: calendar)
+        return MonthProjection(spendToDate: spendToDate,
+                               projected: spendToDate / fraction,
+                               previousCost: lastMonth.isEmpty ? nil : estimate(over: lastMonth).amount,
+                               previousName: previousName)
+    }
+
+    private static func monthName(_ date: Date, calendar: Calendar) -> String {
+        let f = DateFormatter()
+        f.calendar = calendar
+        f.timeZone = calendar.timeZone
+        f.locale = .autoupdatingCurrent
+        f.setLocalizedDateFormatFromTemplate("MMMM")
+        return f.string(from: date)
     }
 
     /// Prices a model→totals map. A model the rate table cannot price contributes

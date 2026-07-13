@@ -144,3 +144,97 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
     #expect(abs(summed - b.cost.amount) < 1e-9)
     #expect(abs(b.cost.amount - 7.0) < 1e-9)   // $5.00 + $2.00
 }
+
+// MARK: - Range
+
+@Test func rangeDecidesHowManyDaysAreDrawn() {
+    for range in UsageRange.allCases {
+        let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal, range: range)
+        #expect(b.days.count == range.days)
+        #expect(b.range == range)
+    }
+}
+
+@Test func aLongerRangeReachesEventsAShorterOneExcludes() {
+    let events = [event(at(2026, 6, 20), "claude-opus-4-8")]   // 19 days back
+    let week = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal, range: .week)
+    let month = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal, range: .month)
+    #expect(week.totals.total == 0)
+    #expect(month.totals.total == 1_000)
+}
+
+// MARK: - Previous period
+
+@Test func previousPeriodIsTheEqualLengthWindowEndingWhereThisOneBegins() {
+    let events = [
+        event(at(2026, 7, 9), "claude-opus-4-8", input: 500),    // in span
+        event(at(2026, 7, 2), "claude-opus-4-8", input: 300),    // previous 7 days
+        event(at(2026, 6, 25), "claude-opus-4-8", input: 900),   // older still — neither
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
+    #expect(b.totals.total == 500)
+    #expect(b.previous?.totals.total == 300)
+}
+
+@Test func previousPeriodIsAbsentWhenItHeldNoActivity() {
+    // A change from zero is not a percentage, and "we never scanned that far
+    // back" looks exactly like "you were idle". Both must suppress the chip.
+    let events = [event(at(2026, 7, 9), "claude-opus-4-8")]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
+    #expect(b.previous == nil)
+    #expect(b.tokenChange == nil)
+}
+
+@Test func changesAreFractionsOfThePreviousValue() {
+    let events = [
+        event(at(2026, 7, 9), "claude-opus-4-8", input: 1_200),
+        event(at(2026, 7, 2), "claude-opus-4-8", input: 1_000),
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
+    #expect(abs((b.tokenChange ?? 0) - 0.2) < 1e-9)
+    #expect(abs((b.costChange ?? 0) - 0.2) < 1e-9)     // one model, so cost tracks tokens
+    #expect(abs((b.messageChange ?? 0) - 0.0) < 1e-9)  // one message each side
+}
+
+// MARK: - Cache hit rate
+
+@Test func cacheHitRateIsCacheReadsShareOfEverythingSentToTheModel() {
+    let events = [UsageEvent(date: at(2026, 7, 9), model: "claude-opus-4-8",
+                             totals: TokenTotals(input: 10, output: 999, cacheCreation: 10,
+                                                 cacheRead: 80, messages: 1))]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
+    // Output is generated, never read from cache, so it is not in the denominator.
+    #expect(abs((b.cacheHitRate ?? 0) - 0.8) < 1e-9)
+}
+
+@Test func cacheHitRateIsAbsentWithNothingToRead() {
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal)
+    #expect(b.cacheHitRate == nil)
+}
+
+// MARK: - Month projection
+
+@Test func monthEndProjectionExtrapolatesSpendAcrossTheWholeMonth() {
+    // Half a 31-day July gone (15.5 days), $10 spent → $20 projected.
+    let events = [event(at(2026, 7, 3), "claude-opus-4-8", input: 2_000_000)]  // $10
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 16, 12), calendar: cal)
+    #expect(abs(b.month.spendToDate - 10) < 1e-9)
+    #expect(abs(b.month.projected - 20) < 0.01)
+}
+
+@Test func lastMonthsSpendIsCarriedForTheProjectionChip() {
+    let events = [
+        event(at(2026, 7, 3), "claude-opus-4-8", input: 2_000_000),   // $10 this month
+        event(at(2026, 6, 14), "claude-opus-4-8", input: 1_000_000),  // $5 in June
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 16, 12), calendar: cal)
+    #expect(abs((b.month.previousCost ?? 0) - 5) < 1e-9)
+    #expect(b.month.previousName == "June")
+}
+
+@Test func anIdlePreviousMonthCarriesNoComparison() {
+    let events = [event(at(2026, 7, 3), "claude-opus-4-8", input: 2_000_000)]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 16, 12), calendar: cal)
+    #expect(b.month.previousCost == nil)
+    #expect(b.month.projectedChange == nil)
+}

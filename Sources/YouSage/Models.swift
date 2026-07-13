@@ -238,6 +238,15 @@ struct CostEstimate: Sendable, Equatable {
         let money = NumberFormat.amount(amount, unit: "USD")
         return isComplete ? money : "≥ \(money)"
     }
+
+    /// Every cent, grouped: "$1,301.42". `display` compacts past $1,000 — which is
+    /// right in the popover, where the figure is a glance, and wrong on the
+    /// dashboard, where "$1.3K" hides the difference between a $1,300 month and a
+    /// $1,349 one.
+    var exactDisplay: String {
+        let money = amount.formatted(.currency(code: "USD"))
+        return isComplete ? money : "≥ \(money)"
+    }
 }
 
 struct TokenReport: Sendable, Equatable {

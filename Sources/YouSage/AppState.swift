@@ -19,6 +19,13 @@ final class AppState: ObservableObject {
     @Published private(set) var tokenTrackingEnabled: Bool = true
     @Published private(set) var tokenReport: TokenReport?
     @Published private(set) var usageBreakdown: UsageBreakdown?
+    /// Range the details window is showing. Not persisted: the design lands on 7D,
+    /// and a window you opened yesterday on 90D should not silently cost you a
+    /// 90-day rescan the next time you glance at it.
+    @Published private(set) var usageRange: UsageRange = .week
+    /// Optional monthly ceiling for the API-list-cost projection, in dollars. nil
+    /// hides the budget card entirely — an unset budget is not a budget of zero.
+    @Published private(set) var monthlyBudget: Double?
     /// False until the first transcript scan of the current session finishes.
     /// Distinguishes "still reading" from "there is nothing to read" — a nil
     /// `usageBreakdown` alone cannot tell those apart.
@@ -44,6 +51,7 @@ final class AppState: ObservableObject {
     private static let metricKey  = "YouSage.menuBarMetric"
     private static let planKey    = "YouSage.planMode"
     private static let tokensKey  = "YouSage.tokenTracking"
+    private static let budgetKey  = "YouSage.monthlyBudget"
 
     private init() {
         sessionKey = Keychain.read(account: "sessionKey")
@@ -59,6 +67,10 @@ final class AppState: ObservableObject {
         }
         if UserDefaults.standard.object(forKey: Self.tokensKey) != nil {
             tokenTrackingEnabled = UserDefaults.standard.bool(forKey: Self.tokensKey)
+        }
+        if UserDefaults.standard.object(forKey: Self.budgetKey) != nil {
+            let stored = UserDefaults.standard.double(forKey: Self.budgetKey)
+            monthlyBudget = stored > 0 ? stored : nil
         }
 
         registerWorkspaceObservers()
@@ -146,6 +158,28 @@ final class AppState: ObservableObject {
             usageBreakdown = nil
             // Re-enabling must show "reading…", not "nothing found".
             hasScannedTokens = false
+        }
+    }
+
+    func setUsageRange(_ range: UsageRange) {
+        guard range != usageRange else { return }
+        usageRange = range
+        // The events are already in memory; only the bucketing changes. Force it,
+        // or the 5-second coalescing window would swallow a range the user just
+        // clicked and leave the old one on screen.
+        refreshTokens(force: true)
+    }
+
+    /// A budget of zero or less is not a budget — it clears the setting instead of
+    /// pinning the meter at 100%.
+    func setMonthlyBudget(_ dollars: Double?) {
+        let value = (dollars ?? 0) > 0 ? dollars : nil
+        guard value != monthlyBudget else { return }
+        monthlyBudget = value
+        if let value {
+            UserDefaults.standard.set(value, forKey: Self.budgetKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.budgetKey)
         }
     }
 
@@ -254,11 +288,12 @@ final class AppState: ObservableObject {
 
         let session = snapshot?.sessionSection?.resetsAt
         let week = snapshot?.weeklyAllSection?.resetsAt
+        let range = usageRange
         tokenScan = Task { [weak self] in
             let report = await TokenTracker.shared.report(sessionResetsAt: session, weekResetsAt: week)
             // Same in-memory events, a different window. The second call re-enters
             // `scan()`, which is incremental and finds nothing new to read.
-            let breakdown = await TokenTracker.shared.breakdown()
+            let breakdown = await TokenTracker.shared.breakdown(range: range)
             await MainActor.run {
                 guard let self else { return }
                 self.tokenReport = report

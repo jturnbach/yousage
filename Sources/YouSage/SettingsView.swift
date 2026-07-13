@@ -7,6 +7,8 @@ struct SettingsView: View {
     @State private var showRaw: Bool = false
     @State private var testStatus: String? = nil
     @State private var testing: Bool = false
+    @State private var budgetInput: String = ""
+    @FocusState private var focusedBudget: Bool
 
     var body: some View {
         ScrollView {
@@ -182,8 +184,53 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
+
+                Divider().padding(.vertical, 4)
+                budgetField
             }
         }
+    }
+
+    /// Optional: the Usage window only draws a budget meter once there is a budget
+    /// to draw it against. Empty means "no budget", not "a budget of zero".
+    private var budgetField: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Monthly budget")
+                TextField("None", text: $budgetInput, prompt: Text("None"))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 110)
+                    .multilineTextAlignment(.trailing)
+                    .onSubmit { saveBudget() }
+                    // A budget typed and left unsubmitted is still a budget the
+                    // user meant; commit it when focus leaves the field.
+                    .onChange(of: focusedBudget) { _, focused in
+                        if !focused { saveBudget() }
+                    }
+                    .focused($focusedBudget)
+                Text("USD")
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Draws a spend-against-budget meter in the Usage window, measured against API list prices for this calendar month. Leave it empty to hide the meter — nobody bills you for these tokens on a subscription.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear {
+            budgetInput = state.monthlyBudget.map { String(format: "%.0f", $0) } ?? ""
+        }
+    }
+
+    private func saveBudget() {
+        let cleaned = budgetInput
+            .trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "$", with: "")
+            .replacingOccurrences(of: ",", with: "")
+        state.setMonthlyBudget(Double(cleaned))
+        // Echo back what was actually stored, so a typo does not linger in the
+        // field looking as though it took effect.
+        budgetInput = state.monthlyBudget.map { String(format: "%.0f", $0) } ?? ""
     }
 
     // MARK: - Instructions

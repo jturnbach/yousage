@@ -4,6 +4,9 @@ import SwiftUI
 struct UsageWindow: View {
     @ObservedObject private var state = AppState.shared
     @State private var showTable = false
+    /// Tokens is the default because it is the measure that exists — the dollars
+    /// are a what-if at API list prices, and this is a subscription tool.
+    @State private var metric: TrendMetric = .tokens
     @State private var exportError: String?
 
     var body: some View {
@@ -26,7 +29,9 @@ struct UsageWindow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let breakdown = state.usageBreakdown {
                 if breakdown.totals.messages == 0 {
-                    message("No activity in the last \(breakdown.range.days) days",
+                    message(breakdown.range == .today
+                            ? "No activity today yet"
+                            : "No activity in the last \(breakdown.range.days) days",
                             "Nothing in ~/.claude/projects falls inside this window.") { EmptyView() }
                 } else {
                     dashboard(breakdown)
@@ -77,12 +82,14 @@ struct UsageWindow: View {
     }
 
     /// "Jul 7 – Jul 13" — the span actually drawn, so the subtitle can never
-    /// disagree with the chart.
+    /// disagree with the chart. Today's span is a single date, and a date printed
+    /// twice with a dash between it is not a range.
     private static func dateRange(_ breakdown: UsageBreakdown) -> String {
-        guard let first = breakdown.days.first?.day, let last = breakdown.days.last?.day else {
+        guard let first = breakdown.buckets.first?.start, let last = breakdown.buckets.last?.start else {
             return ""
         }
         let f = Date.FormatStyle.dateTime.month(.abbreviated).day()
+        guard breakdown.range != .today else { return "Today · \(first.formatted(f))" }
         return "\(first.formatted(f)) – \(last.formatted(f))"
     }
 
@@ -160,7 +167,7 @@ struct UsageWindow: View {
                     }
                 }
                 .padding(.top, 5)
-                CardFootnote(text: "\(breakdown.messagesPerDay.formatted(.number)) / day avg")
+                CardFootnote(text: messageRate(breakdown))
                     .padding(.top, 8)
             }
         }
@@ -172,11 +179,21 @@ struct UsageWindow: View {
     /// Says what the chip is a percentage *of*. Without the previous figure, "▲18%"
     /// is a number with no denominator.
     private func previousTokens(_ breakdown: UsageBreakdown) -> String {
-        guard let previous = breakdown.previous else {
-            return "no activity in the previous \(breakdown.range.days) days"
-        }
-        return "vs. \(NumberFormat.tokens(previous.totals.total)) "
-             + "previous \(breakdown.range.days) days"
+        // Today is compared against yesterday up to this same time, so the
+        // footnote has to say so — "vs. yesterday" would imply a whole day.
+        let period = breakdown.range == .today
+            ? "yesterday to this time"
+            : "previous \(breakdown.range.days) days"
+        guard let previous = breakdown.previous else { return "no activity \(period)" }
+        return "vs. \(NumberFormat.tokens(previous.totals.total)) \(period)"
+    }
+
+    /// A partial day has no daily average to report — one day in, the "average" is
+    /// just the count, and it is still climbing.
+    private func messageRate(_ breakdown: UsageBreakdown) -> String {
+        breakdown.range == .today
+            ? "so far today"
+            : "\(breakdown.messagesPerDay.formatted(.number)) / day avg"
     }
 
     private func costPerMessage(_ breakdown: UsageBreakdown) -> String {
@@ -188,12 +205,22 @@ struct UsageWindow: View {
 
     private func trendCard(_ breakdown: UsageBreakdown) -> some View {
         DashCard(padding: EdgeInsets(top: 15, leading: 18, bottom: 12, trailing: 18)) {
-            HStack(spacing: 14) {
-                Text("Tokens per day")
+            HStack(spacing: 12) {
+                Text(metric.cardTitle(breakdown.range.unit))
                     .font(.system(size: 14, weight: .semibold))
                     .tracking(-0.14)
+                    .fixedSize()
                 Spacer(minLength: 8)
                 ModelLegend(families: families(in: breakdown))
+                Picker("Metric", selection: $metric) {
+                    ForEach(TrendMetric.allCases) { metric in
+                        Text(metric.label).tag(metric)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .help("Plot tokens or API list cost")
                 Picker("View", selection: $showTable) {
                     Image(systemName: "chart.xyaxis.line").tag(false)
                     Image(systemName: "tablecells").tag(true)
@@ -205,9 +232,15 @@ struct UsageWindow: View {
             }
 
             if showTable {
-                DayTable(days: breakdown.days, families: families(in: breakdown))
+                UsageTable(buckets: breakdown.buckets,
+                           families: families(in: breakdown),
+                           metric: metric,
+                           unit: breakdown.range.unit)
             } else {
-                TrendChart(days: breakdown.days)
+                TrendChart(buckets: breakdown.buckets,
+                           families: families(in: breakdown),
+                           metric: metric,
+                           unit: breakdown.range.unit)
             }
         }
     }
@@ -216,7 +249,7 @@ struct UsageWindow: View {
     /// legend nor the table advertises a model you never ran.
     private func families(in breakdown: UsageBreakdown) -> [ModelFamily] {
         ModelFamily.allCases.filter { family in
-            breakdown.days.contains { $0.byFamily.contains { $0.family == family } }
+            breakdown.buckets.contains { $0.byFamily.contains { $0.family == family } }
         }
     }
 

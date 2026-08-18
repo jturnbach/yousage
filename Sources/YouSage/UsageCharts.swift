@@ -3,81 +3,201 @@ import SwiftUI
 
 // MARK: - Trend
 
-/// Daily tokens as an area, with the model split held in the hover tooltip.
-///
-/// The area charts the *total*, because the total is the shape of the week — a
-/// stack would ask the reader to compare segment heights that do not share a
-/// baseline. The per-model numbers are exact in the tooltip and in the table,
-/// which is where exactness belongs.
-struct TrendChart: View {
-    let days: [DayUsage]
-    @Environment(\.colorScheme) private var scheme
-    @State private var selectedDay: Date?
+/// What the trend plots. Both metrics are the same events sliced the same way,
+/// so the chart, its table twin, and the tooltip all read from this one switch
+/// rather than each deciding for itself.
+enum TrendMetric: String, CaseIterable, Identifiable {
+    case tokens, cost
 
-    private var selected: DayUsage? {
-        guard let selectedDay else { return nil }
-        return days.first { Calendar.current.isDate($0.day, inSameDayAs: selectedDay) }
+    var id: String { rawValue }
+
+    /// On the segmented control.
+    var label: String {
+        switch self {
+        case .tokens: return "Tokens"
+        case .cost:   return "Cost"
+        }
     }
 
-    private var accent: Color { ChartPalette.accent(scheme) }
+    /// The card's heading, which has to name what is drawn — a chart of dollars
+    /// under the words "Tokens per day" is a mislabelled axis, and so is a chart
+    /// of hours under "per day".
+    func cardTitle(_ unit: BucketUnit) -> String {
+        let per = unit == .hour ? "hour" : "day"
+        switch self {
+        case .tokens: return "Tokens per \(per)"
+        case .cost:   return "Cost per \(per)"
+        }
+    }
+
+    /// Plotted height for one family on one bucket.
+    func value(_ bucket: UsageBucket, _ family: ModelFamily) -> Double {
+        switch self {
+        case .tokens: return Double(bucket.total(of: family))
+        case .cost:   return bucket.cost(of: family)
+        }
+    }
+
+    func total(_ bucket: UsageBucket) -> Double {
+        switch self {
+        case .tokens: return Double(bucket.totals.total)
+        case .cost:   return bucket.cost.amount
+        }
+    }
+
+    /// Compact enough for an axis tick or a table cell.
+    func format(_ value: Double) -> String {
+        switch self {
+        case .tokens: return NumberFormat.tokens(Int(value))
+        case .cost:   return NumberFormat.money(value)
+        }
+    }
+}
+
+/// Daily tokens or dollars, one line per model family in that family's fixed
+/// colour, with exact per-model numbers in the hover tooltip.
+///
+/// Lines, not a stack: a stack would ask the reader to compare segment heights
+/// that do not share a baseline. Each series is continuous — a family plots 0 on
+/// a bucket it sat idle, because "ran nothing" is a value on a tokens-per-day axis.
+/// Each line sits on its own gradient fill, held translucent enough that where
+/// two overlap the reader still sees both, and the lines themselves — which are
+/// what the eye actually follows — stay opaque on top.
+///
+/// Every x value is the exact bucket-start date, never `unit: .day`: unit
+/// binning centres marks inside a bucket-wide band while the axis labels its
+/// leading edge, drifting every vertex half a step off its label.
+struct TrendChart: View {
+    let buckets: [UsageBucket]
+    let families: [ModelFamily]
+    let metric: TrendMetric
+    /// Day or hour. The chart draws the buckets it is handed either way; the unit
+    /// only decides how the axis, the ticks, and the tooltip name them.
+    let unit: BucketUnit
+    @Environment(\.colorScheme) private var scheme
+    @State private var selectedDate: Date?
+
+    /// Nearest bucket to the hover, so the snap boundary is the midpoint between
+    /// points rather than midnight.
+    private var selected: UsageBucket? {
+        guard let selectedDate else { return nil }
+        return buckets.min {
+            abs($0.start.timeIntervalSince(selectedDate)) < abs($1.start.timeIntervalSince(selectedDate))
+        }
+    }
+
+    /// Names the x axis for VoiceOver and for Charts' own bookkeeping, so an
+    /// hourly chart is not read out as a chart of days.
+    private var xLabel: String { unit == .hour ? "Hour" : "Day" }
+
+    private func color(_ family: ModelFamily) -> Color {
+        ChartPalette.color(for: family, scheme: scheme)
+    }
+
+    /// One fill can afford to be solid; overlapping ones cannot. Two fills at
+    /// 0.32 compound to roughly 0.54 where they cross, which reads as a third
+    /// colour — 0.18 keeps the overlap below the weakest single fill.
+    private var fillOpacity: Double { families.count == 1 ? 0.32 : 0.18 }
 
     var body: some View {
         Chart {
-            ForEach(days) { day in
-                AreaMark(
-                    x: .value("Day", day.day, unit: .day),
-                    y: .value("Tokens", day.totals.total)
-                )
-                .foregroundStyle(
-                    LinearGradient(colors: [accent.opacity(0.32), accent.opacity(0.02)],
-                                   startPoint: .top, endPoint: .bottom)
-                )
-                .interpolationMethod(.linear)
+            // `stacking: .unstacked` is load-bearing: area marks stack by default,
+            // so two families would draw the second one's fill on top of the
+            // first's — a pale ceiling above both lines at their sum, which reads
+            // as a series nobody plotted. Every fill is also declared before every
+            // line and pinned below the selection rule, so a later family's area
+            // cannot wash over an earlier family's line.
+            ForEach(families, id: \.self) { family in
+                ForEach(buckets) { bucket in
+                    AreaMark(
+                        x: .value(xLabel, bucket.start),
+                        y: .value(metric.label, metric.value(bucket, family)),
+                        series: .value("Model", family.displayName),
+                        stacking: .unstacked
+                    )
+                    .foregroundStyle(
+                        LinearGradient(colors: [color(family).opacity(fillOpacity),
+                                                color(family).opacity(0.02)],
+                                       startPoint: .top, endPoint: .bottom)
+                    )
+                    .interpolationMethod(.linear)
+                    .zIndex(-2)
+                }
+            }
 
-                LineMark(
-                    x: .value("Day", day.day, unit: .day),
-                    y: .value("Tokens", day.totals.total)
-                )
-                .foregroundStyle(accent)
-                .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                .interpolationMethod(.linear)
+            ForEach(families, id: \.self) { family in
+                ForEach(buckets) { bucket in
+                    LineMark(
+                        x: .value(xLabel, bucket.start),
+                        y: .value(metric.label, metric.value(bucket, family)),
+                        series: .value("Model", family.displayName)
+                    )
+                    .foregroundStyle(color(family))
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    .interpolationMethod(.linear)
+                }
+            }
+
+            // A line needs two vertices. In the first hour of the day the hourly
+            // range holds exactly one bucket, and lines and areas alike would draw
+            // nothing at all — an empty plot that reads as "no data" over data.
+            // A single reading is a point, so draw it as one.
+            if buckets.count == 1, let only = buckets.first {
+                ForEach(families, id: \.self) { family in
+                    PointMark(
+                        x: .value(xLabel, only.start),
+                        y: .value(metric.label, metric.value(only, family))
+                    )
+                    .symbolSize(64)
+                    .foregroundStyle(color(family))
+                }
             }
 
             if let selected {
-                RuleMark(x: .value("Day", selected.day, unit: .day))
+                RuleMark(x: .value(xLabel, selected.start))
                     .foregroundStyle(.quaternary)
                     .zIndex(-1)
 
-                // The dot is a mark, not an overlay. Hand-placing it from
-                // `proxy.position(forX:)` puts it half a day off the line's vertex,
-                // because the day-binned scale anchors marks differently than the
-                // proxy reports. Drawn here, it is placed by the same scale that
-                // draws the line, so it cannot drift. The pale disc under it is the
-                // 2px ring — one mark cannot both fill and stroke.
-                PointMark(
-                    x: .value("Day", selected.day, unit: .day),
-                    y: .value("Tokens", selected.totals.total)
-                )
-                .symbolSize(169)
-                .foregroundStyle(.background)
+                // The dots are marks, not an overlay. Hand-placing them from
+                // `proxy.position(forX:)` can drift off the line's vertex; drawn
+                // here they are placed by the same scale that draws the lines.
+                // The pale disc under each is the 2px ring — one mark cannot both
+                // fill and stroke — and it keeps two families' dots legible when
+                // their values nearly coincide.
+                ForEach(families, id: \.self) { family in
+                    PointMark(
+                        x: .value(xLabel, selected.start),
+                        y: .value(metric.label, metric.value(selected, family))
+                    )
+                    .symbolSize(169)
+                    .foregroundStyle(.background)
 
-                PointMark(
-                    x: .value("Day", selected.day, unit: .day),
-                    y: .value("Tokens", selected.totals.total)
-                )
-                .symbolSize(81)
-                .foregroundStyle(accent)
+                    PointMark(
+                        x: .value(xLabel, selected.start),
+                        y: .value(metric.label, metric.value(selected, family))
+                    )
+                    .symbolSize(81)
+                    .foregroundStyle(color(family))
+                }
             }
         }
-        .chartXSelection(value: $selectedDay)
+        .chartXSelection(value: $selectedDate)
         .chartLegend(.hidden)   // The card header carries the legend.
+        // With exact-date x values the first and last vertices land on the plot's
+        // edges, and an edge tick's centred label would clip at the chart frame.
+        // Inset the scale by half the widest label so every tick keeps its label.
+        .chartXScale(range: .plotDimension(padding: 18))
         .chartXAxis {
             AxisMarks(values: xAxisValues) { value in
-                AxisValueLabel {
+                // anchor: custom label content is leading-anchored to its tick by
+                // default, which shifts every label half its width off the point;
+                // .top pins the label's top-centre to the tick instead.
+                // collisionResolution: .automatic drops the edge tick's label as a
+                // collision with the plot boundary; the ticks are hand-strided to
+                // never collide, so resolution has nothing left to do but harm.
+                AxisValueLabel(anchor: .top, collisionResolution: .disabled) {
                     if let date = value.as(Date.self) {
-                        Text(date, format: days.count <= 7
-                             ? .dateTime.weekday(.abbreviated)
-                             : .dateTime.month(.abbreviated).day())
+                        Text(date, format: axisFormat)
                     }
                 }
                 .font(.system(size: 11))
@@ -88,8 +208,8 @@ struct TrendChart: View {
             AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
                 AxisGridLine()   // solid hairline; never dashed
                 AxisValueLabel {
-                    if let count = value.as(Int.self) {
-                        Text(NumberFormat.tokens(count))
+                    if let amount = value.as(Double.self) {
+                        Text(metric.format(amount))
                     }
                 }
                 .font(.system(size: 10))
@@ -110,9 +230,9 @@ struct TrendChart: View {
             GeometryReader { geo in
                 if let selected, let anchor = proxy.plotFrame {
                     let plot = geo[anchor]
-                    let centre = plot.minX + (proxy.position(forX: selected.day) ?? 0)
+                    let centre = plot.minX + (proxy.position(forX: selected.start) ?? 0)
 
-                    DayTooltip(day: selected)
+                    BucketTooltip(bucket: selected, metric: metric, unit: unit)
                         .frame(width: Self.tooltipWidth, alignment: .leading)
                         .offset(x: min(max(centre - Self.tooltipWidth / 2, plot.minX + 4),
                                        plot.maxX - Self.tooltipWidth - 4),
@@ -125,10 +245,23 @@ struct TrendChart: View {
         .frame(height: 206)
     }
 
-    /// Every day gets a label at 7 days; past that they would collide, so Charts
-    /// picks a readable subset.
-    private var xAxisValues: AxisMarkValues {
-        days.count <= 7 ? .automatic(desiredCount: days.count) : .automatic(desiredCount: 6)
+    /// Weekdays read fastest over a week and dates over a month, but a day wants
+    /// clock times — the unit decides, never the bucket count, or an hourly chart
+    /// before 8am would label its hours with weekday names.
+    private var axisFormat: Date.FormatStyle {
+        if unit == .hour { return .dateTime.hour() }
+        return buckets.count <= 7
+            ? .dateTime.weekday(.abbreviated)
+            : .dateTime.month(.abbreviated).day()
+    }
+
+    /// Ticks sit on dates the data actually holds — never `.automatic`, whose
+    /// chosen positions need not coincide with a plotted point. Every bucket gets a
+    /// label at 7 buckets; past that, an even stride of ~6.
+    private var xAxisValues: [Date] {
+        guard buckets.count > 7 else { return buckets.map(\.start) }
+        let stride = max(1, buckets.count / 6)
+        return buckets.indices.filter { $0.isMultiple(of: stride) }.map { buckets[$0].start }
     }
 
     /// Fixed, so the horizontal clamp can be computed before layout.
@@ -137,38 +270,47 @@ struct TrendChart: View {
 
 /// The trend chart is the one place values hide inside a single line, so it is the
 /// one place that needs a tooltip. The lists below are direct-labelled.
-private struct DayTooltip: View {
-    let day: DayUsage
+private struct BucketTooltip: View {
+    let bucket: UsageBucket
+    let metric: TrendMetric
+    let unit: BucketUnit
+
+    /// An hour is named by its clock reading; a day by its weekday and date.
+    private var title: Date.FormatStyle {
+        unit == .hour
+            ? .dateTime.hour().minute()
+            : .dateTime.weekday(.abbreviated).month(.abbreviated).day()
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Text(day.day, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
+                Text(bucket.start, format: title)
                 Spacer(minLength: 8)
-                Text(day.isToday ? "so far" : NumberFormat.tokens(day.totals.total))
+                Text(bucket.isCurrent ? "so far" : metric.format(metric.total(bucket)))
                     .monospacedDigit()
             }
             .font(.system(size: 11, weight: .semibold))
 
-            if day.byFamily.isEmpty {
+            if bucket.byFamily.isEmpty {
                 Text("No activity")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(day.byFamily) { segment in
+                ForEach(bucket.byFamily) { segment in
                     HStack(spacing: 5) {
                         ModelSwatch(family: segment.family, size: 7)
                         Text(segment.family.displayName)
                             .foregroundStyle(.secondary)
                         Spacer(minLength: 12)
-                        Text(NumberFormat.tokens(segment.totals.total))
+                        Text(metric.format(metric.value(bucket, segment.family)))
                             .fontWeight(.medium)
                             .monospacedDigit()
                     }
                     .font(.system(size: 11))
                 }
-                if day.isToday {
-                    Text("Today, still accruing")
+                if bucket.isCurrent {
+                    Text(unit == .hour ? "This hour, still accruing" : "Today, still accruing")
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
                 }
@@ -280,13 +422,25 @@ struct TokenKindList: View {
 
 /// The accessible twin the chart is supposed to have, and the place to read exact
 /// numbers rather than approximate a line's height.
-struct DayTable: View {
-    let days: [DayUsage]
+struct UsageTable: View {
+    let buckets: [UsageBucket]
     let families: [ModelFamily]
+    /// The table is the chart's twin, so it reads whichever metric the chart is
+    /// drawing. Two views of one dataset disagreeing about their units would be
+    /// worse than having no table at all.
+    let metric: TrendMetric
+    let unit: BucketUnit
+
+    /// The same naming the chart's axis uses, for the same reason.
+    private var rowFormat: Date.FormatStyle {
+        unit == .hour
+            ? .dateTime.hour().minute()
+            : .dateTime.weekday(.abbreviated).month(.abbreviated).day()
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            row(day: Text("Day"),
+            row(bucket: Text(unit == .hour ? "Hour" : "Day"),
                 cells: families.map { Text($0.displayName) },
                 total: Text("Total"))
                 .font(.system(size: 11, weight: .semibold))
@@ -296,13 +450,13 @@ struct DayTable: View {
                 .padding(.bottom, 8)
             Divider()
 
-            ForEach(days) { day in
-                row(day: Text(day.day, format: .dateTime.weekday(.abbreviated).month(.abbreviated).day())
+            ForEach(buckets) { bucket in
+                row(bucket: Text(bucket.start, format: rowFormat)
                         .fontWeight(.medium),
                     cells: families.map { family in
-                        Text(tokens(of: family, in: day)).foregroundStyle(.secondary)
+                        Text(cell(family, in: bucket)).foregroundStyle(.secondary)
                     },
-                    total: Text(NumberFormat.tokens(day.totals.total)).fontWeight(.semibold))
+                    total: Text(metric.format(metric.total(bucket))).fontWeight(.semibold))
                     .font(.system(size: 12))
                     .monospacedDigit()
                     .padding(.vertical, 7)
@@ -312,15 +466,16 @@ struct DayTable: View {
     }
 
     /// An unused model reads "—", not "0": the model was not run, it did not run
-    /// to zero.
-    private func tokens(of family: ModelFamily, in day: DayUsage) -> String {
-        guard let segment = day.byFamily.first(where: { $0.family == family }) else { return "—" }
-        return NumberFormat.tokens(segment.totals.total)
+    /// to zero. The chart cannot make that distinction — a line has to be
+    /// somewhere — which is exactly why the table is worth keeping.
+    private func cell(_ family: ModelFamily, in bucket: UsageBucket) -> String {
+        guard bucket.byFamily.contains(where: { $0.family == family }) else { return "—" }
+        return metric.format(metric.value(bucket, family))
     }
 
-    private func row(day: Text, cells: [Text], total: Text) -> some View {
+    private func row(bucket: Text, cells: [Text], total: Text) -> some View {
         WeightedHStack(weights: [1.1] + Array(repeating: 1, count: cells.count + 1), spacing: 8) {
-            day.frame(maxWidth: .infinity, alignment: .leading)
+            bucket.frame(maxWidth: .infinity, alignment: .leading)
             ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
                 cell.frame(maxWidth: .infinity, alignment: .trailing)
             }

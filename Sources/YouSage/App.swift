@@ -19,6 +19,7 @@ struct YouSageApp: App {
                 .frame(width: 380)
         } label: {
             MenuBarLabel()
+                .modifier(OpensUsageAtLaunch())
         }
         .menuBarExtraStyle(.window)
 
@@ -34,5 +35,22 @@ struct YouSageApp: App {
                 .frame(width: 520, height: 520)
         }
         .windowResizability(.contentSize)
+    }
+}
+
+/// `open YouSage.app --args -openUsageAtLaunch YES` presents the Usage window
+/// immediately — the only way to reach it without clicking through the menu bar
+/// extra, which scripted UI runs can't always do. It rides on the menu bar
+/// label because that is the one view alive at launch.
+private struct OpensUsageAtLaunch: ViewModifier {
+    @Environment(\.openWindow) private var openWindow
+
+    func body(content: Content) -> some View {
+        content.task {
+            if UserDefaults.standard.bool(forKey: "openUsageAtLaunch") {
+                openWindow(id: "usage")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
     }
 }

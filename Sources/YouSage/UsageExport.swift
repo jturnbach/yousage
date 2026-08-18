@@ -23,28 +23,42 @@ enum UsageExport {
         return "YouSage \(breakdown.range.label) \(day).csv"
     }
 
-    static func csv(_ breakdown: UsageBreakdown) -> String {
+    /// `timeZone` is a parameter rather than a constant so the tests can pin it;
+    /// the app always exports in the zone the buckets were counted in.
+    static func csv(_ breakdown: UsageBreakdown, timeZone: TimeZone = .current) -> String {
         let families = ModelFamily.allCases.filter { family in
-            breakdown.days.contains { $0.byFamily.contains { $0.family == family } }
+            breakdown.buckets.contains { $0.byFamily.contains { $0.family == family } }
         }
+        let hourly = breakdown.range.unit == .hour
 
         var rows: [[String]] = [
-            ["Day"] + families.map(\.displayName) + ["Total tokens", "Cost (USD)"]
+            [hourly ? "Hour" : "Day"] + families.map(\.displayName)
+            + ["Total tokens", "Cost (USD)"]
         ]
-        for day in breakdown.days {
+        for bucket in breakdown.buckets {
             let counts = families.map { family -> String in
-                let tokens = day.byFamily.first { $0.family == family }?.totals.total ?? 0
+                let tokens = bucket.byFamily.first { $0.family == family }?.totals.total ?? 0
                 return String(tokens)
             }
             rows.append(
-                [day.day.formatted(.iso8601.year().month().day().dateSeparator(.dash))]
+                [timestamp(bucket.start, hourly: hourly, timeZone: timeZone)]
                 + counts
                 // Raw counts and unrounded dollars: a spreadsheet wants the number,
                 // not the compacted "676.6M" the window shows a reader.
-                + [String(day.totals.total), String(format: "%.4f", day.cost.amount)]
+                + [String(bucket.totals.total), String(format: "%.4f", bucket.cost.amount)]
             )
         }
         return rows.map { $0.map(escape).joined(separator: ",") }.joined(separator: "\n") + "\n"
+    }
+
+    /// Buckets are local instants, so they are written in the local zone. The zone
+    /// has to be given explicitly: `.iso8601` formats in GMT unless told otherwise,
+    /// which would shift every hour — and, east of Greenwich, every date.
+    private static func timestamp(_ date: Date, hourly: Bool, timeZone: TimeZone) -> String {
+        let day = Date.ISO8601FormatStyle(timeZone: timeZone)
+            .year().month().day().dateSeparator(.dash)
+        guard hourly else { return date.formatted(day) }
+        return date.formatted(day.dateTimeSeparator(.space).time(includingFractionalSeconds: false))
     }
 
     /// RFC 4180: quote anything holding a comma, quote, or newline, and double the

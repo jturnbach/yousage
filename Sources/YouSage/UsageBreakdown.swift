@@ -67,19 +67,42 @@ enum TokenKind: String, Sendable, CaseIterable {
 struct FamilyTokens: Sendable, Equatable, Identifiable {
     let family: ModelFamily
     let totals: TokenTotals
+    /// What this family's slice of the day would have cost at list prices. Held
+    /// per family rather than derived from `totals`, because the rate depends on
+    /// which models are inside the family — Opus 4.8 and a future Opus need not
+    /// price alike.
+    let cost: CostEstimate
     var id: ModelFamily { family }
 }
 
-struct DayUsage: Sendable, Equatable, Identifiable {
-    /// Local start of day.
-    let day: Date
-    /// Still accruing; the chart draws it at reduced opacity.
-    let isToday: Bool
-    /// Only families active that day, in `ModelFamily.allCases` order.
+/// One bucket of the drawn window: a calendar day for the multi-day ranges, an
+/// hour for `.today`. The unit lives on the breakdown rather than in here, so a
+/// bucket never has to be asked what it is to be summed or plotted.
+struct UsageBucket: Sendable, Equatable, Identifiable {
+    /// Local start of the bucket — midnight for a day, the top of the hour for
+    /// an hour.
+    let start: Date
+    /// The bucket the clock is still inside, so it is still accruing; the chart
+    /// draws it at reduced opacity.
+    let isCurrent: Bool
+    /// Only families active in the bucket, in `ModelFamily.allCases` order.
     let byFamily: [FamilyTokens]
     let totals: TokenTotals
     let cost: CostEstimate
-    var id: Date { day }
+    var id: Date { start }
+
+    /// Tokens this family used in the bucket, zero when it sat idle. The chart
+    /// plots this for every family × bucket so each series is a continuous line;
+    /// the table keeps its own lookup because it distinguishes "—" from 0.
+    func total(of family: ModelFamily) -> Int {
+        byFamily.first { $0.family == family }?.totals.total ?? 0
+    }
+
+    /// The same slice in dollars, for the chart's cost metric. Zero in an idle
+    /// bucket, exactly as `total(of:)` is.
+    func cost(of family: ModelFamily) -> Double {
+        byFamily.first { $0.family == family }?.cost.amount ?? 0
+    }
 }
 
 struct ModelCost: Sendable, Equatable, Identifiable {
@@ -99,13 +122,27 @@ struct KindTotal: Sendable, Equatable, Identifiable {
     var id: TokenKind { kind }
 }
 
+/// The width of one bucket the window draws. Anything longer than a day is drawn
+/// a day at a time; today is drawn an hour at a time, because a single day plotted
+/// as a single point is not a trend.
+enum BucketUnit: Sendable, Equatable {
+    case day, hour
+}
+
 /// How far back the details window looks. Raw value is the day count, so the
 /// label and the arithmetic never drift apart.
 enum UsageRange: Int, Sendable, CaseIterable, Identifiable {
-    case week = 7, month = 30, quarter = 90
+    case today = 1, week = 7, month = 30, quarter = 90
 
     var days: Int { rawValue }
-    var label: String { "\(rawValue)D" }
+
+    /// "Today", not "1D": a one-day label has to say whether it means the calendar
+    /// day or a rolling 24 hours, and this one is the calendar day — midnight to
+    /// midnight, in the machine's own zone.
+    var label: String { self == .today ? "Today" : "\(rawValue)D" }
+
+    var unit: BucketUnit { self == .today ? .hour : .day }
+
     var id: Int { rawValue }
 }
 
@@ -142,12 +179,13 @@ struct MonthProjection: Sendable, Equatable {
     }
 }
 
-/// A range of calendar days of usage, sliced three ways, plus the comparisons the
-/// dashboard's chips need. A tuple would be lighter than `KindTotal`, but tuples
-/// do not synthesize `Equatable` and SwiftUI needs that.
+/// A range of usage, sliced three ways, plus the comparisons the dashboard's
+/// chips need. A tuple would be lighter than `KindTotal`, but tuples do not
+/// synthesize `Equatable` and SwiftUI needs that.
 struct UsageBreakdown: Sendable, Equatable {
-    /// Exactly `range.days` entries, oldest first, zero-filled.
-    let days: [DayUsage]
+    /// Oldest first, zero-filled. One per calendar day for the multi-day ranges;
+    /// one per elapsed hour of today for `.today`.
+    let buckets: [UsageBucket]
     /// Cost descending, then tokens descending, then name — so the order is total.
     let models: [ModelCost]
     /// Always four, in declaration order.
@@ -186,8 +224,10 @@ struct UsageBreakdown: Sendable, Equatable {
 
     /// Messages per day, averaged across the whole range including idle days —
     /// the range is the window the user chose, so it is the window we average over.
+    /// Divided by the range's *days*, never by its buckets: an hourly range would
+    /// otherwise report messages per hour under a "per day" label.
     var messagesPerDay: Int {
-        days.isEmpty ? 0 : Int((Double(totals.messages) / Double(days.count)).rounded())
+        Int((Double(totals.messages) / Double(max(range.days, 1))).rounded())
     }
 
     static func cacheHitRate(of totals: TokenTotals) -> Double? {
@@ -203,53 +243,66 @@ struct UsageBreakdown: Sendable, Equatable {
 }
 
 extension UsageBreakdown {
-    /// The last `dayCount` local calendar days ending on `now`'s day.
+    /// The window `range` describes, bucketed by `range.unit`: the last
+    /// `range.days` calendar days, or today's elapsed hours.
     ///
     /// Pure: everything the window draws is decided here, so it can be tested with
     /// synthetic events instead of transcript fixtures. Bucketing goes through
-    /// `Calendar.startOfDay`, so a 23-hour spring-forward day and a 25-hour
-    /// fall-back day both land where a human would put them.
+    /// `Calendar`, so a 23-hour spring-forward day and a 25-hour fall-back day
+    /// both land where a human would put them — and the hourly range simply has
+    /// one bucket fewer or more on those two days.
     static func make(from events: [UsageEvent],
                      now: Date,
                      calendar: Calendar,
                      range: UsageRange = .week) -> UsageBreakdown {
-        let dayCount = range.days
-        let today = calendar.startOfDay(for: now)
-        let dayStarts: [Date] = (0..<dayCount).reversed().compactMap {
-            calendar.date(byAdding: .day, value: -$0, to: today)
-        }
-        let spanStart = dayStarts[0]
-        let spanEnd = calendar.date(byAdding: .day, value: 1, to: today) ?? now
+        let bucketStarts = bucketStarts(for: range, now: now, calendar: calendar)
+        let spanStart = bucketStarts[0]
+        // The end of the last bucket, not the end of the day: for `.today` the
+        // hours still to come are not part of the window, because they hold
+        // nothing and drawing them as zero would read as a collapse in usage.
+        let spanEnd = calendar.date(byAdding: range.unit == .hour ? .hour : .day,
+                                    value: 1, to: bucketStarts.last ?? spanStart) ?? now
 
         // Bucket once; every slice below reads from these two maps.
-        var perDayModel: [Date: [String: TokenTotals]] = [:]
+        var perBucketModel: [Date: [String: TokenTotals]] = [:]
         var perModel: [String: TokenTotals] = [:]
         for e in events where e.date >= spanStart && e.date < spanEnd {
-            let day = calendar.startOfDay(for: e.date)
-            var models = perDayModel[day] ?? [:]
+            let bucket = bucketStart(of: e.date, unit: range.unit, calendar: calendar)
+            var models = perBucketModel[bucket] ?? [:]
             models[e.model] = (models[e.model] ?? TokenTotals()) + e.totals
-            perDayModel[day] = models
+            perBucketModel[bucket] = models
             perModel[e.model] = (perModel[e.model] ?? TokenTotals()) + e.totals
         }
 
-        let days: [DayUsage] = dayStarts.map { day in
-            let models = perDayModel[day] ?? [:]
+        let buckets: [UsageBucket] = bucketStarts.map { day in
+            let models = perBucketModel[day] ?? [:]
 
-            var byFamilyMap: [ModelFamily: TokenTotals] = [:]
+            // Grouped by family but kept per model, so each family's dollars go
+            // through the same `estimate` the day and the window use — one
+            // pricing path, so the family lines can never sum to something other
+            // than the day's total.
+            var byFamilyMap: [ModelFamily: [String: TokenTotals]] = [:]
             for (id, totals) in models {
                 let family = ModelFamily(modelID: id)
-                byFamilyMap[family] = (byFamilyMap[family] ?? TokenTotals()) + totals
+                var inFamily = byFamilyMap[family] ?? [:]
+                inFamily[id] = (inFamily[id] ?? TokenTotals()) + totals
+                byFamilyMap[family] = inFamily
             }
             let byFamily = ModelFamily.allCases.compactMap { family -> FamilyTokens? in
-                guard let totals = byFamilyMap[family], !totals.isEmpty else { return nil }
-                return FamilyTokens(family: family, totals: totals)
+                guard let inFamily = byFamilyMap[family] else { return nil }
+                let totals = inFamily.values.reduce(TokenTotals()) { $0 + $1 }
+                guard !totals.isEmpty else { return nil }
+                return FamilyTokens(family: family,
+                                    totals: totals,
+                                    cost: estimate(over: inFamily))
             }
 
-            return DayUsage(day: day,
-                            isToday: day == today,
-                            byFamily: byFamily,
-                            totals: byFamily.reduce(TokenTotals()) { $0 + $1.totals },
-                            cost: estimate(over: models))
+            // The last bucket is the one the clock is inside, in both units.
+            return UsageBucket(start: day,
+                               isCurrent: day == bucketStarts.last,
+                               byFamily: byFamily,
+                               totals: byFamily.reduce(TokenTotals()) { $0 + $1.totals },
+                               cost: estimate(over: models))
         }
 
         let models: [ModelCost] = perModel.map { id, totals in
@@ -268,30 +321,47 @@ extension UsageBreakdown {
         let totals = models.reduce(TokenTotals()) { $0 + $1.totals }
         let kinds = TokenKind.allCases.map { KindTotal(kind: $0, count: $0.count(in: totals)) }
 
-        return UsageBreakdown(days: days,
+        return UsageBreakdown(buckets: buckets,
                               models: models,
                               kinds: kinds,
                               totals: totals,
                               cost: estimate(over: perModel),
                               range: range,
                               previous: previousPeriod(in: events, before: spanStart,
-                                                       dayCount: dayCount, calendar: calendar),
+                                                       now: now, range: range, calendar: calendar),
                               month: projectMonth(from: events, now: now, calendar: calendar),
                               generatedAt: now)
     }
 
-    /// The equal-length window ending where the drawn one begins. Returns nil when
-    /// it is empty, so a chip never divides by zero and never claims an infinite
-    /// rise off a period we may simply never have scanned.
+    /// The comparable window before the drawn one. Returns nil when it is empty,
+    /// so a chip never divides by zero and never claims an infinite rise off a
+    /// period we may simply never have scanned.
+    ///
+    /// For the daily ranges that is the equal-length window ending where the drawn
+    /// one begins. For `.today` it is yesterday up to this time of day, not all of
+    /// yesterday: a morning's usage measured against a whole finished day would
+    /// show a fall in usage every single morning.
     private static func previousPeriod(in events: [UsageEvent],
                                        before spanStart: Date,
-                                       dayCount: Int,
+                                       now: Date,
+                                       range: UsageRange,
                                        calendar: Calendar) -> PeriodTotals? {
-        guard let start = calendar.date(byAdding: .day, value: -dayCount, to: spanStart) else {
-            return nil
+        let start: Date?
+        let end: Date
+        switch range.unit {
+        case .day:
+            start = calendar.date(byAdding: .day, value: -range.days, to: spanStart)
+            end = spanStart
+        case .hour:
+            start = calendar.date(byAdding: .day, value: -1, to: spanStart)
+            // Elapsed seconds rather than a wall-clock time, so on a DST day the
+            // two windows are the same length rather than the same clock reading.
+            end = (start ?? spanStart).addingTimeInterval(now.timeIntervalSince(spanStart))
         }
+        guard let start else { return nil }
+
         var perModel: [String: TokenTotals] = [:]
-        for e in events where e.date >= start && e.date < spanStart {
+        for e in events where e.date >= start && e.date < end {
             perModel[e.model] = (perModel[e.model] ?? TokenTotals()) + e.totals
         }
         guard !perModel.isEmpty else { return nil }
@@ -300,6 +370,46 @@ extension UsageBreakdown {
         return PeriodTotals(totals: totals,
                             cost: estimate(over: perModel),
                             cacheHitRate: cacheHitRate(of: totals))
+    }
+
+    /// Every bucket the window draws, oldest first. Never empty: a range is at
+    /// least one day, and a day is at least its first hour.
+    private static func bucketStarts(for range: UsageRange,
+                                     now: Date,
+                                     calendar: Calendar) -> [Date] {
+        let today = calendar.startOfDay(for: now)
+        switch range.unit {
+        case .day:
+            let starts = (0..<range.days).reversed().compactMap {
+                calendar.date(byAdding: .day, value: -$0, to: today)
+            }
+            return starts.isEmpty ? [today] : starts
+        case .hour:
+            // Walked with the calendar rather than strided by 3600 seconds, so the
+            // day that skips an hour has one bucket fewer and the day that repeats
+            // one has an extra, exactly as those days were lived.
+            let current = bucketStart(of: now, unit: .hour, calendar: calendar)
+            var starts: [Date] = []
+            var cursor = today
+            while cursor <= current {
+                starts.append(cursor)
+                guard let next = calendar.date(byAdding: .hour, value: 1, to: cursor),
+                      next > cursor else { break }
+                cursor = next
+            }
+            return starts.isEmpty ? [today] : starts
+        }
+    }
+
+    /// The bucket an event belongs to. The one place a date becomes a bucket key,
+    /// so the buckets drawn and the events counted can never disagree.
+    private static func bucketStart(of date: Date,
+                                    unit: BucketUnit,
+                                    calendar: Calendar) -> Date {
+        switch unit {
+        case .day:  return calendar.startOfDay(for: date)
+        case .hour: return calendar.dateInterval(of: .hour, for: date)?.start ?? date
+        }
     }
 
     /// Spend so far this calendar month, extrapolated to its end at the same rate.

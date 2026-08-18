@@ -16,6 +16,14 @@ import Testing
     #expect(CostEstimate(amount: 0).isComplete)
 }
 
+@Test func axisMoneyDropsCentsOnlyWhereTheyAreNotTheWholeNumber() {
+    #expect(NumberFormat.money(0) == "$0")
+    #expect(NumberFormat.money(0.42) == "$0.42")     // cents are the whole figure
+    #expect(NumberFormat.money(9.99) == "$9.99")
+    #expect(NumberFormat.money(217.06) == "$217")    // a tick, not an invoice
+    #expect(NumberFormat.money(1_301.42) == "$1.3K")
+}
+
 @Test func exactDisplayKeepsTheCentsThatCompactDisplayThrowsAway() {
     var cost = CostEstimate()
     cost.amount = 1_301.42

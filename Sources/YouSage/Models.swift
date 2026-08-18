@@ -96,6 +96,16 @@ enum NumberFormat {
 
     static func tokens(_ value: Int) -> String { compact(Double(value)) }
 
+    /// Dollars at a glance — for axis ticks, tooltips, and table cells, where a
+    /// column of "$217.06" is four characters of noise per row. Cents survive
+    /// only below $10, which is the scale at which they are the whole number.
+    static func money(_ value: Double) -> String {
+        let abs = Swift.abs(value)
+        if abs >= 1_000 { return "$" + compact(value) }
+        if abs >= 10 || abs == 0 { return "$\(Int(value.rounded()))" }
+        return String(format: "$%.2f", value)
+    }
+
     static func compact(_ value: Double, forceDecimals: Bool = false) -> String {
         let abs = Swift.abs(value)
         switch abs {

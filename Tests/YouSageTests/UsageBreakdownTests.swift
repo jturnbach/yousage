@@ -21,7 +21,7 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
 
 @Test func sevenDaysAreAlwaysReturnedEvenFromNoEvents() {
     let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal)
-    #expect(b.days.count == 7)
+    #expect(b.buckets.count == 7)
     #expect(b.totals.total == 0)
     #expect(b.cost.amount == 0)
     #expect(b.cost.isComplete)
@@ -29,19 +29,19 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
 
 @Test func daysAreOldestFirstAndOnlyTheLastIsToday() {
     let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal)
-    #expect(b.days.first!.day == cal.startOfDay(for: at(2026, 7, 3)))
-    #expect(b.days.last!.day == cal.startOfDay(for: at(2026, 7, 9)))
-    #expect(b.days.filter(\.isToday).count == 1)
-    #expect(b.days.last!.isToday)
+    #expect(b.buckets.first!.start == cal.startOfDay(for: at(2026, 7, 3)))
+    #expect(b.buckets.last!.start == cal.startOfDay(for: at(2026, 7, 9)))
+    #expect(b.buckets.filter(\.isCurrent).count == 1)
+    #expect(b.buckets.last!.isCurrent)
 }
 
 @Test func aDayWithNoActivityIsPresentAndEmptyRatherThanAbsent() {
     let events = [event(at(2026, 7, 9), "claude-opus-4-8")]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
-    #expect(b.days.count == 7)
-    #expect(b.days[0].totals.total == 0)
-    #expect(b.days[0].byFamily.isEmpty)
-    #expect(b.days[6].totals.total == 1_000)
+    #expect(b.buckets.count == 7)
+    #expect(b.buckets[0].totals.total == 0)
+    #expect(b.buckets[0].byFamily.isEmpty)
+    #expect(b.buckets[6].totals.total == 1_000)
 }
 
 @Test func eventsOutsideTheSpanAreExcluded() {
@@ -62,7 +62,7 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 3, 8, 3, 30), "claude-opus-4-8"),   // after the jump
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 3, 10), calendar: cal)
-    let march8 = b.days.first { $0.day == cal.startOfDay(for: at(2026, 3, 8)) }
+    let march8 = b.buckets.first { $0.start == cal.startOfDay(for: at(2026, 3, 8)) }
     #expect(march8?.totals.total == 2_000)
 }
 
@@ -73,7 +73,7 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 11, 1, 23, 0), "claude-opus-4-8"),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 11, 3), calendar: cal)
-    let nov1 = b.days.first { $0.day == cal.startOfDay(for: at(2026, 11, 1)) }
+    let nov1 = b.buckets.first { $0.start == cal.startOfDay(for: at(2026, 11, 1)) }
     #expect(nov1?.totals.total == 2_000)
 }
 
@@ -84,10 +84,39 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 7, 9), "claude-haiku-4-5"),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
-    let today = b.days.last!
+    let today = b.buckets.last!
     #expect(today.byFamily.map(\.family) == [.opus, .haiku])
     #expect(today.byFamily.first!.totals.total == 2_000)   // both Opus versions
     #expect(b.models.map(\.displayName).sorted() == ["Haiku 4.5", "Opus 4.7", "Opus 4.8"])
+}
+
+@Test func familyTotalIsZeroOnDaysTheFamilyWasIdle() {
+    let events = [
+        event(at(2026, 7, 8), "claude-opus-4-8"),
+        event(at(2026, 7, 9), "claude-fable-5"),
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
+    let yesterday = b.buckets[5], today = b.buckets[6]
+    #expect(yesterday.total(of: .opus) == 1_000)
+    #expect(yesterday.total(of: .fable) == 0)
+    #expect(today.total(of: .opus) == 0)
+    #expect(today.total(of: .fable) == 1_000)
+}
+
+@Test func familyCostIsZeroWhenIdleAndTheFamiliesSumToTheDayCost() {
+    let events = [
+        event(at(2026, 7, 8), "claude-opus-4-8"),
+        event(at(2026, 7, 9), "claude-opus-4-8"),
+        event(at(2026, 7, 9), "claude-fable-5"),
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
+    let yesterday = b.buckets[5], today = b.buckets[6]
+
+    #expect(yesterday.cost(of: .fable) == 0)
+    #expect(today.cost(of: .opus) > 0)
+    // Same tokens, twice the input rate: Fable is $10/M against Opus's $5/M.
+    #expect(today.cost(of: .fable) == today.cost(of: .opus) * 2)
+    #expect(abs(today.cost(of: .opus) + today.cost(of: .fable) - today.cost.amount) < 1e-12)
 }
 
 @Test func familySegmentsFollowDeclarationOrderNotInsertionOrder() {
@@ -96,7 +125,7 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 7, 9), "claude-opus-4-8"),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
-    #expect(b.days.last!.byFamily.map(\.family) == [.opus, .haiku])
+    #expect(b.buckets.last!.byFamily.map(\.family) == [.opus, .haiku])
 }
 
 @Test func modelsSortByCostNotByTokens() {
@@ -140,17 +169,18 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 7, 9), "claude-haiku-4-5", input: 2_000_000),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
-    let summed = b.days.reduce(0.0) { $0 + $1.cost.amount }
+    let summed = b.buckets.reduce(0.0) { $0 + $1.cost.amount }
     #expect(abs(summed - b.cost.amount) < 1e-9)
     #expect(abs(b.cost.amount - 7.0) < 1e-9)   // $5.00 + $2.00
 }
 
 // MARK: - Range
 
-@Test func rangeDecidesHowManyDaysAreDrawn() {
-    for range in UsageRange.allCases {
+@Test func aDailyRangeDrawsOneBucketPerDay() {
+    // `.today` is hourly and is covered by its own tests below.
+    for range in UsageRange.allCases where range.unit == .day {
         let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal, range: range)
-        #expect(b.days.count == range.days)
+        #expect(b.buckets.count == range.days)
         #expect(b.range == range)
     }
 }
@@ -237,4 +267,108 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 16, 12), calendar: cal)
     #expect(b.month.previousCost == nil)
     #expect(b.month.projectedChange == nil)
+}
+
+// MARK: - Today
+
+@Test func todayIsAnHourlyRangeAndTheOthersAreDaily() {
+    #expect(UsageRange.today.unit == .hour)
+    #expect(UsageRange.today.days == 1)
+    #expect(UsageRange.today.label == "Today")
+    for range in UsageRange.allCases where range != .today {
+        #expect(range.unit == .day)
+    }
+}
+
+@Test func todayBucketsByHourFromMidnightThroughTheCurrentHour() {
+    // 14:30 — fifteen buckets, 00:00 through 14:00. The hours that have not
+    // happened yet are absent, not zero: a zero-filled evening would draw a line
+    // collapsing to the axis for the rest of the day.
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
+    #expect(b.buckets.count == 15)
+    #expect(b.buckets.first!.start == at(2026, 7, 9, 0, 0))
+    #expect(b.buckets.last!.start == at(2026, 7, 9, 14, 0))
+}
+
+@Test func onlyTheHourTheClockIsInsideIsStillAccruing() {
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
+    #expect(b.buckets.filter(\.isCurrent).count == 1)
+    #expect(b.buckets.last!.isCurrent)
+}
+
+@Test func todayStartsAtMidnightAndExcludesYesterday() {
+    let events = [
+        event(at(2026, 7, 8, 23, 59), "claude-opus-4-8", input: 700),   // yesterday — out
+        event(at(2026, 7, 9, 0, 1), "claude-opus-4-8", input: 300),     // first minute — in
+        event(at(2026, 7, 9, 14, 5), "claude-opus-4-8", input: 200),    // current hour — in
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
+    #expect(b.totals.total == 500)
+    #expect(b.buckets.first!.totals.total == 300)
+    #expect(b.buckets.last!.totals.total == 200)
+}
+
+@Test func anIdleHourIsPresentAndEmptyRatherThanAbsent() {
+    let events = [event(at(2026, 7, 9, 2, 15), "claude-opus-4-8")]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 4, 30), calendar: cal, range: .today)
+    #expect(b.buckets.count == 5)
+    #expect(b.buckets[2].totals.total == 1_000)
+    #expect(b.buckets[3].byFamily.isEmpty)
+    #expect(b.buckets[3].totals.total == 0)
+}
+
+@Test func hourlyCostsSumToTheTotalCost() {
+    let events = [
+        event(at(2026, 7, 9, 1, 0), "claude-opus-4-8", input: 1_000_000),    // $5.00
+        event(at(2026, 7, 9, 9, 30), "claude-haiku-4-5", input: 2_000_000),  // $2.00
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
+    let summed = b.buckets.reduce(0.0) { $0 + $1.cost.amount }
+    #expect(abs(summed - b.cost.amount) < 1e-9)
+    #expect(abs(b.cost.amount - 7.0) < 1e-9)
+}
+
+@Test func todaysPreviousPeriodIsYesterdayUpToThisTimeOfDay() {
+    // Half a day against a whole one would invent a fall in usage every morning.
+    let events = [
+        event(at(2026, 7, 9, 10, 0), "claude-opus-4-8", input: 500),    // today
+        event(at(2026, 7, 8, 10, 0), "claude-opus-4-8", input: 300),    // yesterday, before 14:30
+        event(at(2026, 7, 8, 20, 0), "claude-opus-4-8", input: 900),    // yesterday, after — out
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
+    #expect(b.totals.total == 500)
+    #expect(b.previous?.totals.total == 300)
+}
+
+@Test func messagesPerDayCountsTodayAsOneDayNotAsItsHours() {
+    let events = [
+        event(at(2026, 7, 9, 1, 0), "claude-opus-4-8"),
+        event(at(2026, 7, 9, 2, 0), "claude-opus-4-8"),
+        event(at(2026, 7, 9, 3, 0), "claude-opus-4-8"),
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
+    #expect(b.totals.messages == 3)
+    #expect(b.messagesPerDay == 3)
+}
+
+@Test func hourlyBucketingSurvivesSpringForward() {
+    // 2026-03-08 skips 02:00 in America/New_York: midnight to 04:30 is four hours.
+    let events = [
+        event(at(2026, 3, 8, 1, 30), "claude-opus-4-8"),
+        event(at(2026, 3, 8, 3, 30), "claude-opus-4-8"),
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 3, 8, 4, 30), calendar: cal, range: .today)
+    #expect(b.buckets.count == 4)
+    #expect(b.buckets.map(\.totals.total) == [0, 1_000, 1_000, 0])
+    #expect(b.totals.total == 2_000)
+}
+
+@Test func hourlyBucketingSurvivesFallBack() {
+    // 2026-11-01 repeats 01:00 in America/New_York, so midnight to 03:30 is five
+    // hours, not four. `at(...)` resolves the ambiguous hour to the first pass.
+    let b = UsageBreakdown.make(from: [event(at(2026, 11, 1, 1, 30), "claude-opus-4-8")],
+                                now: at(2026, 11, 1, 3, 30), calendar: cal, range: .today)
+    #expect(b.buckets.count == 5)
+    #expect(b.buckets.map(\.totals.total) == [0, 1_000, 0, 0, 0])
+    #expect(b.buckets.last!.isCurrent)
 }

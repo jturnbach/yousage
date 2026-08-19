@@ -68,6 +68,8 @@ enum TrendMetric: String, CaseIterable, Identifiable {
 /// binning centres marks inside a bucket-wide band while the axis labels its
 /// leading edge, drifting every vertex half a step off its label.
 struct TrendChart: View {
+    /// Every bucket of the window, the not-yet-lived ones included: they are what
+    /// holds the axis open to the whole day or week.
     let buckets: [UsageBucket]
     let families: [ModelFamily]
     let metric: TrendMetric
@@ -77,13 +79,29 @@ struct TrendChart: View {
     @Environment(\.colorScheme) private var scheme
     @State private var selectedDate: Date?
 
-    /// Nearest bucket to the hover, so the snap boundary is the midpoint between
-    /// points rather than midnight.
+    /// What the lines are made of. An hour that has not happened is not an hour of
+    /// zero usage, so it is not a vertex — the line stops at the present and the
+    /// axis carries on without it.
+    private var drawn: [UsageBucket] { buckets.filter { !$0.isFuture } }
+
+    /// Nearest drawn bucket to the hover, so the snap boundary is the midpoint
+    /// between points rather than midnight — and so hovering the empty evening
+    /// reports the last real hour instead of "No activity" at 9pm.
     private var selected: UsageBucket? {
         guard let selectedDate else { return nil }
-        return buckets.min {
+        return drawn.min {
             abs($0.start.timeIntervalSince(selectedDate)) < abs($1.start.timeIntervalSince(selectedDate))
         }
+    }
+
+    /// The whole window, so the axis reads 12a–12a all day and Sunday–Saturday all
+    /// week. Widened when the window has drawn down to a single point, because a
+    /// zero-width domain has no scale to place it on.
+    private var xDomain: ClosedRange<Date> {
+        guard let first = buckets.first?.start, let last = buckets.last?.start else {
+            return Date()...Date().addingTimeInterval(3600)
+        }
+        return last > first ? first...last : first...first.addingTimeInterval(3600)
     }
 
     /// Names the x axis for VoiceOver and for Charts' own bookkeeping, so an
@@ -108,7 +126,7 @@ struct TrendChart: View {
             // line and pinned below the selection rule, so a later family's area
             // cannot wash over an earlier family's line.
             ForEach(families, id: \.self) { family in
-                ForEach(buckets) { bucket in
+                ForEach(drawn) { bucket in
                     AreaMark(
                         x: .value(xLabel, bucket.start),
                         y: .value(metric.label, metric.value(bucket, family)),
@@ -126,7 +144,7 @@ struct TrendChart: View {
             }
 
             ForEach(families, id: \.self) { family in
-                ForEach(buckets) { bucket in
+                ForEach(drawn) { bucket in
                     LineMark(
                         x: .value(xLabel, bucket.start),
                         y: .value(metric.label, metric.value(bucket, family)),
@@ -142,7 +160,7 @@ struct TrendChart: View {
             // range holds exactly one bucket, and lines and areas alike would draw
             // nothing at all — an empty plot that reads as "no data" over data.
             // A single reading is a point, so draw it as one.
-            if buckets.count == 1, let only = buckets.first {
+            if drawn.count == 1, let only = drawn.first {
                 ForEach(families, id: \.self) { family in
                     PointMark(
                         x: .value(xLabel, only.start),
@@ -186,7 +204,7 @@ struct TrendChart: View {
         // With exact-date x values the first and last vertices land on the plot's
         // edges, and an edge tick's centred label would clip at the chart frame.
         // Inset the scale by half the widest label so every tick keeps its label.
-        .chartXScale(range: .plotDimension(padding: 18))
+        .chartXScale(domain: xDomain, range: .plotDimension(padding: 18))
         .chartXAxis {
             AxisMarks(values: xAxisValues) { value in
                 // anchor: custom label content is leading-anchored to its tick by

@@ -85,6 +85,11 @@ struct UsageBucket: Sendable, Equatable, Identifiable {
     /// The bucket the clock is still inside, so it is still accruing; the chart
     /// draws it at reduced opacity.
     let isCurrent: Bool
+    /// The bucket has not begun. A day is always drawn midnight to midnight and a
+    /// week always first weekday to last, so the window carries hours and days
+    /// that have not happened — and an hour that cannot yet hold anything is not
+    /// an hour of zero usage. The chart keeps them on the axis and off the line.
+    let isFuture: Bool
     /// Only families active in the bucket, in `ModelFamily.allCases` order.
     let byFamily: [FamilyTokens]
     let totals: TokenTotals
@@ -136,12 +141,43 @@ enum UsageRange: Int, Sendable, CaseIterable, Identifiable {
 
     var days: Int { rawValue }
 
-    /// "Today", not "1D": a one-day label has to say whether it means the calendar
-    /// day or a rolling 24 hours, and this one is the calendar day — midnight to
-    /// midnight, in the machine's own zone.
-    var label: String { self == .today ? "Today" : "\(rawValue)D" }
+    /// "Today" and "Week" name calendar periods, because that is what they draw:
+    /// midnight to midnight, and first weekday to last, in the machine's own zone
+    /// and week. "7D" would promise a rolling window, which is what the longer
+    /// two ranges actually are.
+    var label: String {
+        switch self {
+        case .today: return "Today"
+        case .week:  return "Week"
+        default:     return "\(rawValue)D"
+        }
+    }
+
+    /// Whether the window snaps to a calendar period rather than ending on today.
+    /// The two short ranges do; a "30D" that quietly became a calendar month
+    /// would be a different thing under the same label.
+    var isCalendarAligned: Bool { self == .today || self == .week }
 
     var unit: BucketUnit { self == .today ? .hour : .day }
+
+    /// What one step of the paging buttons moves by, named for a tooltip: "the
+    /// previous week" rather than "the previous 7D", which is a label, not a noun.
+    var stepName: String {
+        switch self {
+        case .today: return "day"
+        case .week:  return "week"
+        default:     return "\(days) days"
+        }
+    }
+
+    /// Whole periods of history behind the current window that the transcripts
+    /// can still answer for. `TokenTracker` retains a day more than this, so the
+    /// oldest bucket of the oldest window is always whole.
+    static let historyDays = 180
+
+    /// How many periods the window may be paged back. A range longer than the
+    /// history keeps this at zero rather than offering a step into nothing.
+    var maxOffset: Int { max(0, Self.historyDays / days - 1) }
 
     var id: Int { rawValue }
 }
@@ -193,6 +229,10 @@ struct UsageBreakdown: Sendable, Equatable {
     let totals: TokenTotals
     let cost: CostEstimate
     let range: UsageRange
+    /// How many whole periods back the drawn window sits; 0 is the one the clock
+    /// is inside. Held here so the window can label what it drew without
+    /// recomputing the span.
+    let offset: Int
     /// nil when the preceding window was idle. A change from zero is not a
     /// percentage, so the chips must be able to say nothing at all.
     let previous: PeriodTotals?
@@ -222,12 +262,27 @@ struct UsageBreakdown: Sendable, Equatable {
         totals.messages > 0 ? cost.amount / Double(totals.messages) : nil
     }
 
-    /// Messages per day, averaged across the whole range including idle days —
-    /// the range is the window the user chose, so it is the window we average over.
-    /// Divided by the range's *days*, never by its buckets: an hourly range would
-    /// otherwise report messages per hour under a "per day" label.
+    /// The buckets that have begun, oldest first — everything drawn as a line, a
+    /// row, or a total. `buckets` additionally carries what the axis spans.
+    var lived: [UsageBucket] { buckets.filter { !$0.isFuture } }
+
+    /// Days of the window that have begun. A week still running has lived fewer
+    /// than seven, and averaging over the days it has not yet reached would report
+    /// a fall in usage every Sunday.
+    var daysElapsed: Int {
+        switch range.unit {
+        // An hourly window is one day however much of it has elapsed — dividing by
+        // its hours would report messages per hour under a "per day" label.
+        case .hour: return 1
+        case .day:  return max(1, lived.count)
+        }
+    }
+
+    /// Messages per day, averaged across the days the window has lived, idle ones
+    /// included — an idle Tuesday is a day you used nothing, and it belongs in the
+    /// average; a Friday that has not arrived does not.
     var messagesPerDay: Int {
-        Int((Double(totals.messages) / Double(max(range.days, 1))).rounded())
+        Int((Double(totals.messages) / Double(max(daysElapsed, 1))).rounded())
     }
 
     static func cacheHitRate(of totals: TokenTotals) -> Double? {
@@ -254,8 +309,10 @@ extension UsageBreakdown {
     static func make(from events: [UsageEvent],
                      now: Date,
                      calendar: Calendar,
-                     range: UsageRange = .week) -> UsageBreakdown {
-        let bucketStarts = bucketStarts(for: range, now: now, calendar: calendar)
+                     range: UsageRange = .week,
+                     offset: Int = 0) -> UsageBreakdown {
+        let offset = max(0, offset)
+        let bucketStarts = bucketStarts(for: range, now: now, calendar: calendar, offset: offset)
         let spanStart = bucketStarts[0]
         // The end of the last bucket, not the end of the day: for `.today` the
         // hours still to come are not part of the window, because they hold
@@ -273,6 +330,10 @@ extension UsageBreakdown {
             perBucketModel[bucket] = models
             perModel[e.model] = (perModel[e.model] ?? TokenTotals()) + e.totals
         }
+
+        // The bucket the clock is inside, named once so every bucket can be asked
+        // whether it is that one. Outside the present window it matches nothing.
+        let currentStart = offset == 0 ? bucketStart(of: now, unit: range.unit, calendar: calendar) : nil
 
         let buckets: [UsageBucket] = bucketStarts.map { day in
             let models = perBucketModel[day] ?? [:]
@@ -297,9 +358,12 @@ extension UsageBreakdown {
                                     cost: estimate(over: inFamily))
             }
 
-            // The last bucket is the one the clock is inside, in both units.
+            // Not the last bucket: a day is drawn to midnight and a week to
+            // Saturday, so the bucket the clock is inside is usually somewhere in
+            // the middle. Nothing in a finished window is still accruing.
             return UsageBucket(start: day,
-                               isCurrent: day == bucketStarts.last,
+                               isCurrent: day == currentStart,
+                               isFuture: day > now,
                                byFamily: byFamily,
                                totals: byFamily.reduce(TokenTotals()) { $0 + $1.totals },
                                cost: estimate(over: models))
@@ -327,8 +391,10 @@ extension UsageBreakdown {
                               totals: totals,
                               cost: estimate(over: perModel),
                               range: range,
+                              offset: offset,
                               previous: previousPeriod(in: events, before: spanStart,
-                                                       now: now, range: range, calendar: calendar),
+                                                       now: now, range: range, offset: offset,
+                                                       calendar: calendar),
                               month: projectMonth(from: events, now: now, calendar: calendar),
                               generatedAt: now)
     }
@@ -345,20 +411,20 @@ extension UsageBreakdown {
                                        before spanStart: Date,
                                        now: Date,
                                        range: UsageRange,
+                                       offset: Int,
                                        calendar: Calendar) -> PeriodTotals? {
-        let start: Date?
-        let end: Date
-        switch range.unit {
-        case .day:
-            start = calendar.date(byAdding: .day, value: -range.days, to: spanStart)
-            end = spanStart
-        case .hour:
-            start = calendar.date(byAdding: .day, value: -1, to: spanStart)
-            // Elapsed seconds rather than a wall-clock time, so on a DST day the
-            // two windows are the same length rather than the same clock reading.
-            end = (start ?? spanStart).addingTimeInterval(now.timeIntervalSince(spanStart))
+        let days = range.unit == .hour ? 1 : range.days
+        guard let start = calendar.date(byAdding: .day, value: -days, to: spanStart) else {
+            return nil
         }
-        guard let start else { return nil }
+        // A finished window is compared against the whole window before it. One
+        // still running is compared only as far into that window as the clock has
+        // gone — half a week against a whole one would invent a collapse in usage
+        // every Sunday. Measured in elapsed seconds rather than a wall-clock
+        // reading, so a DST week compares two windows of the same length.
+        let end = offset == 0
+            ? start.addingTimeInterval(now.timeIntervalSince(spanStart))
+            : spanStart
 
         var perModel: [String: TokenTotals] = [:]
         for e in events where e.date >= start && e.date < end {
@@ -376,28 +442,48 @@ extension UsageBreakdown {
     /// least one day, and a day is at least its first hour.
     private static func bucketStarts(for range: UsageRange,
                                      now: Date,
-                                     calendar: Calendar) -> [Date] {
+                                     calendar: Calendar,
+                                     offset: Int) -> [Date] {
         let today = calendar.startOfDay(for: now)
-        switch range.unit {
-        case .day:
-            let starts = (0..<range.days).reversed().compactMap {
-                calendar.date(byAdding: .day, value: -$0, to: today)
-            }
-            return starts.isEmpty ? [today] : starts
-        case .hour:
-            // Walked with the calendar rather than strided by 3600 seconds, so the
-            // day that skips an hour has one bucket fewer and the day that repeats
-            // one has an extra, exactly as those days were lived.
-            let current = bucketStart(of: now, unit: .hour, calendar: calendar)
+        switch range {
+        case .today:
+            // Midnight to midnight, always — the axis reads the same at breakfast
+            // as at bedtime, and the hours not yet lived are marked rather than
+            // dropped. Walked with the calendar rather than strided by 3600
+            // seconds, so the day that skips an hour has one bucket fewer and the
+            // day that repeats one has an extra, exactly as those days were lived.
+            let start = calendar.date(byAdding: .day, value: -offset, to: today) ?? today
+            let end = calendar.date(byAdding: .day, value: 1, to: start) ?? start
             var starts: [Date] = []
-            var cursor = today
-            while cursor <= current {
+            var cursor = start
+            while cursor < end {
                 starts.append(cursor)
                 guard let next = calendar.date(byAdding: .hour, value: 1, to: cursor),
                       next > cursor else { break }
                 cursor = next
             }
-            return starts.isEmpty ? [today] : starts
+            return starts.isEmpty ? [start] : starts
+
+        case .week:
+            // The calendar's own week — Sunday here, Monday where the machine says
+            // so — rather than the seven days ending today, so the same weekday
+            // always sits in the same column.
+            let thisWeek = calendar.dateInterval(of: .weekOfYear, for: now)?.start ?? today
+            let start = calendar.date(byAdding: .weekOfYear, value: -offset, to: thisWeek) ?? thisWeek
+            let starts = (0..<range.days).compactMap {
+                calendar.date(byAdding: .day, value: $0, to: start)
+            }
+            return starts.isEmpty ? [start] : starts
+
+        default:
+            // A rolling window: the last `range.days` days, ending today. Stepped a
+            // period at a time through the calendar, so paging back over a DST
+            // boundary lands on a midnight rather than on 23:00 the evening before.
+            let anchor = calendar.date(byAdding: .day, value: -offset * range.days, to: today) ?? today
+            let starts = (0..<range.days).reversed().compactMap {
+                calendar.date(byAdding: .day, value: -$0, to: anchor)
+            }
+            return starts.isEmpty ? [anchor] : starts
         }
     }
 

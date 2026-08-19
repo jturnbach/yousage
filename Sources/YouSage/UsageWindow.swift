@@ -29,9 +29,7 @@ struct UsageWindow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let breakdown = state.usageBreakdown {
                 if breakdown.totals.messages == 0 {
-                    message(breakdown.range == .today
-                            ? "No activity today yet"
-                            : "No activity in the last \(breakdown.range.days) days",
+                    message(Self.emptyTitle(breakdown),
                             "Nothing in ~/.claude/projects falls inside this window.") { EmptyView() }
                 } else {
                     dashboard(breakdown)
@@ -58,7 +56,18 @@ struct UsageWindow: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
-        ToolbarItem(placement: .primaryAction) {
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                state.stepUsage(by: -1)
+            } label: {
+                Label("Earlier", systemImage: "chevron.left")
+            }
+            // The end of the retained transcripts, not of the activity: a quiet
+            // period is still a period, and it draws as an empty chart.
+            .disabled(state.usageOffset >= state.usageRange.maxOffset)
+            .keyboardShortcut(.leftArrow, modifiers: .command)
+            .help("Show the previous \(state.usageRange.stepName)")
+
             Picker("Range", selection: Binding(get: { state.usageRange },
                                                set: { state.setUsageRange($0) })) {
                 ForEach(UsageRange.allCases) { range in
@@ -69,6 +78,15 @@ struct UsageWindow: View {
             .labelsHidden()
             .fixedSize()
             .help("How far back to look")
+
+            Button {
+                state.stepUsage(by: 1)
+            } label: {
+                Label("Later", systemImage: "chevron.right")
+            }
+            .disabled(state.usageOffset == 0)
+            .keyboardShortcut(.rightArrow, modifiers: .command)
+            .help("Show the next \(state.usageRange.stepName)")
         }
         ToolbarItem(placement: .primaryAction) {
             Button {
@@ -82,15 +100,33 @@ struct UsageWindow: View {
     }
 
     /// "Jul 7 – Jul 13" — the span actually drawn, so the subtitle can never
-    /// disagree with the chart. Today's span is a single date, and a date printed
-    /// twice with a dash between it is not a range.
-    private static func dateRange(_ breakdown: UsageBreakdown) -> String {
+    /// disagree with the chart. A single-day span is a single date, and a date
+    /// printed twice with a dash between it is not a range; it is named where a
+    /// name exists, because "Jul 18" a day after the 18th reads as a stale window.
+    static func dateRange(_ breakdown: UsageBreakdown) -> String {
         guard let first = breakdown.buckets.first?.start, let last = breakdown.buckets.last?.start else {
             return ""
         }
         let f = Date.FormatStyle.dateTime.month(.abbreviated).day()
-        guard breakdown.range != .today else { return "Today · \(first.formatted(f))" }
-        return "\(first.formatted(f)) – \(last.formatted(f))"
+        guard breakdown.range == .today else {
+            return "\(first.formatted(f)) – \(last.formatted(f))"
+        }
+        switch breakdown.offset {
+        case 0:  return "Today · \(first.formatted(f))"
+        case 1:  return "Yesterday · \(first.formatted(f))"
+        default: return first.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+        }
+    }
+
+    /// The drawn window is empty. Which window that is lives in the subtitle, so
+    /// the title only has to say whether the period is still running.
+    static func emptyTitle(_ breakdown: UsageBreakdown) -> String {
+        guard breakdown.offset == 0 else { return "No activity in this period" }
+        switch breakdown.range {
+        case .today: return "No activity today yet"
+        case .week:  return "No activity this week"
+        default:     return "No activity in the last \(breakdown.range.days) days"
+        }
     }
 
     // MARK: - Page
@@ -145,7 +181,7 @@ struct UsageWindow: View {
                 }
                 MetricValue(text: NumberFormat.tokens(breakdown.totals.total), size: 31)
                     .padding(.top, 5)
-                CardFootnote(text: previousTokens(breakdown))
+                CardFootnote(text: Self.previousTokens(breakdown))
                     .padding(.top, 6)
             }
             DashCard {
@@ -167,7 +203,7 @@ struct UsageWindow: View {
                     }
                 }
                 .padding(.top, 5)
-                CardFootnote(text: messageRate(breakdown))
+                CardFootnote(text: Self.messageRate(breakdown))
                     .padding(.top, 8)
             }
         }
@@ -178,22 +214,31 @@ struct UsageWindow: View {
 
     /// Says what the chip is a percentage *of*. Without the previous figure, "▲18%"
     /// is a number with no denominator.
-    private func previousTokens(_ breakdown: UsageBreakdown) -> String {
+    static func previousTokens(_ breakdown: UsageBreakdown) -> String {
         // Today is compared against yesterday up to this same time, so the
-        // footnote has to say so — "vs. yesterday" would imply a whole day.
-        let period = breakdown.range == .today
-            ? "yesterday to this time"
-            : "previous \(breakdown.range.days) days"
+        // footnote has to say so — "vs. yesterday" would imply a whole day. A day
+        // already finished *is* compared whole, against the whole day before it.
+        let period: String
+        switch (breakdown.range, breakdown.offset) {
+        case (.today, 0): period = "yesterday to this time"
+        case (.today, _): period = "the day before"
+        case (.week, 0):  period = "last week to this point"
+        case (.week, _):  period = "the week before"
+        default:          period = "previous \(breakdown.range.days) days"
+        }
         guard let previous = breakdown.previous else { return "no activity \(period)" }
         return "vs. \(NumberFormat.tokens(previous.totals.total)) \(period)"
     }
 
     /// A partial day has no daily average to report — one day in, the "average" is
-    /// just the count, and it is still climbing.
-    private func messageRate(_ breakdown: UsageBreakdown) -> String {
-        breakdown.range == .today
-            ? "so far today"
-            : "\(breakdown.messagesPerDay.formatted(.number)) / day avg"
+    /// just the count, and it is still climbing. A finished day has the count, and
+    /// calling it an average over one day would be arithmetic dressed as insight.
+    static func messageRate(_ breakdown: UsageBreakdown) -> String {
+        switch (breakdown.range, breakdown.offset) {
+        case (.today, 0): return "so far today"
+        case (.today, _): return "across the day"
+        default:          return "\(breakdown.messagesPerDay.formatted(.number)) / day avg"
+        }
     }
 
     private func costPerMessage(_ breakdown: UsageBreakdown) -> String {
@@ -232,7 +277,9 @@ struct UsageWindow: View {
             }
 
             if showTable {
-                UsageTable(buckets: breakdown.buckets,
+                // The table lists measurements, so it stops where they do; the
+                // chart takes the whole window because its axis spans it.
+                UsageTable(buckets: breakdown.lived,
                            families: families(in: breakdown),
                            metric: metric,
                            unit: breakdown.range.unit)
@@ -249,7 +296,7 @@ struct UsageWindow: View {
     /// legend nor the table advertises a model you never ran.
     private func families(in breakdown: UsageBreakdown) -> [ModelFamily] {
         ModelFamily.allCases.filter { family in
-            breakdown.buckets.contains { $0.byFamily.contains { $0.family == family } }
+            breakdown.lived.contains { $0.byFamily.contains { $0.family == family } }
         }
     }
 

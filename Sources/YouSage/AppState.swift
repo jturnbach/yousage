@@ -23,6 +23,9 @@ final class AppState: ObservableObject {
     /// and a window you opened yesterday on 90D should not silently cost you a
     /// 90-day rescan the next time you glance at it.
     @Published private(set) var usageRange: UsageRange = .week
+    /// How many whole periods back the details window is paged; 0 is the window
+    /// the clock is inside. Not persisted, for the same reason the range is not.
+    @Published private(set) var usageOffset: Int = 0
     /// Optional monthly ceiling for the API-list-cost projection, in dollars. nil
     /// hides the budget card entirely — an unset budget is not a budget of zero.
     @Published private(set) var monthlyBudget: Double?
@@ -164,9 +167,26 @@ final class AppState: ObservableObject {
     func setUsageRange(_ range: UsageRange) {
         guard range != usageRange else { return }
         usageRange = range
+        // Five weeks back is not five months back, so a period count means nothing
+        // once the period changes length. Changing the range returns to the present.
+        usageOffset = 0
         // The events are already in memory; only the bucketing changes. Force it,
         // or the 5-second coalescing window would swallow a range the user just
         // clicked and leave the old one on screen.
+        refreshTokens(force: true)
+    }
+
+    /// Pages the details window by whole periods — negative is further back,
+    /// positive is towards the present. Clamped, so the buttons that call it can
+    /// simply be disabled at the ends rather than guarding the arithmetic.
+    func stepUsage(by periods: Int) {
+        setUsageOffset(usageOffset - periods)
+    }
+
+    func setUsageOffset(_ offset: Int) {
+        let clamped = min(max(offset, 0), usageRange.maxOffset)
+        guard clamped != usageOffset else { return }
+        usageOffset = clamped
         refreshTokens(force: true)
     }
 
@@ -289,11 +309,12 @@ final class AppState: ObservableObject {
         let session = snapshot?.sessionSection?.resetsAt
         let week = snapshot?.weeklyAllSection?.resetsAt
         let range = usageRange
+        let offset = usageOffset
         tokenScan = Task { [weak self] in
             let report = await TokenTracker.shared.report(sessionResetsAt: session, weekResetsAt: week)
             // Same in-memory events, a different window. The second call re-enters
             // `scan()`, which is incremental and finds nothing new to read.
-            let breakdown = await TokenTracker.shared.breakdown(range: range)
+            let breakdown = await TokenTracker.shared.breakdown(range: range, offset: offset)
             await MainActor.run {
                 guard let self else { return }
                 self.tokenReport = report

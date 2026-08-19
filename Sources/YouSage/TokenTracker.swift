@@ -17,13 +17,14 @@ import Foundation
 actor TokenTracker {
     static let shared = TokenTracker()
 
-    /// Deep enough for the longest range the details window offers (90 days) *and*
-    /// the equal-length window behind it that its trend chips compare against, plus
-    /// a day of slack so the oldest bucket is always whole. Claude Code prunes its
-    /// own transcripts long before this, so in practice the disk runs out of history
-    /// before we run out of retention — which is why an empty prior period is
-    /// reported as "no comparison" rather than as a fall to zero.
-    private static let retention: TimeInterval = 181 * 24 * 3600
+    /// Deep enough for every window the details window can be paged back to —
+    /// `UsageRange.historyDays` — *and* the equal-length window behind the oldest
+    /// of them that its trend chips compare against, plus a day of slack so the
+    /// oldest bucket is always whole. Claude Code prunes its own transcripts long
+    /// before this, so in practice the disk runs out of history before we run out
+    /// of retention — which is why an empty prior period is reported as "no
+    /// comparison" rather than as a fall to zero.
+    private static let retention: TimeInterval = TimeInterval(UsageRange.historyDays + 1) * 24 * 3600
     private static let sessionLength: TimeInterval = 5 * 3600
     /// Ceiling on bytes ingested per scan, so a pathological backlog can't stall
     /// a refresh. Whatever is missed is picked up on the next pass.
@@ -115,12 +116,14 @@ actor TokenTracker {
     /// so the two totals will not agree, and each is labelled with the window it
     /// describes.
     func breakdown(range: UsageRange = .week,
+                   offset: Int = 0,
                    now: Date = Date(),
                    calendar: Calendar = .current) -> UsageBreakdown? {
         guard isAvailable else { return nil }
         scan()
         let usage = events.map { UsageEvent(date: $0.date, model: $0.model, totals: $0.totals) }
-        return UsageBreakdown.make(from: usage, now: now, calendar: calendar, range: range)
+        return UsageBreakdown.make(from: usage, now: now, calendar: calendar,
+                                   range: range, offset: offset)
     }
 
     private func modelSplit(_ events: [Event]) -> [ModelTokens] {

@@ -8,8 +8,29 @@ private let newYork = TimeZone(identifier: "America/New_York")!
 private var cal: Calendar = {
     var c = Calendar(identifier: .gregorian)
     c.timeZone = newYork
+    // Pinned, because the week view follows it: a machine set to Monday weeks
+    // must not change what these tests assert.
+    c.firstWeekday = 1
     return c
 }()
+
+/// A Monday-week calendar, for the tests that prove the window follows the
+/// calendar rather than a hard-coded Sunday.
+private var mondayCal: Calendar = {
+    var c = cal
+    c.firstWeekday = 2
+    return c
+}()
+
+/// The bucket covering a given day. Indexing by position broke every time the
+/// window moved; naming the day does not.
+private func day(_ b: UsageBreakdown, _ date: Date) -> UsageBucket? {
+    b.buckets.first { $0.start == cal.startOfDay(for: date) }
+}
+
+private func lived(_ b: UsageBreakdown) -> [UsageBucket] {
+    b.buckets.filter { !$0.isFuture }
+}
 
 private func at(_ y: Int, _ mo: Int, _ d: Int, _ h: Int = 12, _ mi: Int = 0) -> Date {
     cal.date(from: DateComponents(year: y, month: mo, day: d, hour: h, minute: mi))!
@@ -27,27 +48,28 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
     #expect(b.cost.isComplete)
 }
 
-@Test func daysAreOldestFirstAndOnlyTheLastIsToday() {
+@Test func theWeekRunsSundayToSaturdayAroundTheDayInProgress() {
+    // Thursday 2026-07-09 sits in the week of Sunday the 5th.
     let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal)
-    #expect(b.buckets.first!.start == cal.startOfDay(for: at(2026, 7, 3)))
-    #expect(b.buckets.last!.start == cal.startOfDay(for: at(2026, 7, 9)))
+    #expect(b.buckets.first!.start == cal.startOfDay(for: at(2026, 7, 5)))
+    #expect(b.buckets.last!.start == cal.startOfDay(for: at(2026, 7, 11)))
     #expect(b.buckets.filter(\.isCurrent).count == 1)
-    #expect(b.buckets.last!.isCurrent)
+    #expect(day(b, at(2026, 7, 9))!.isCurrent)
 }
 
 @Test func aDayWithNoActivityIsPresentAndEmptyRatherThanAbsent() {
     let events = [event(at(2026, 7, 9), "claude-opus-4-8")]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
     #expect(b.buckets.count == 7)
-    #expect(b.buckets[0].totals.total == 0)
-    #expect(b.buckets[0].byFamily.isEmpty)
-    #expect(b.buckets[6].totals.total == 1_000)
+    #expect(day(b, at(2026, 7, 5))!.totals.total == 0)
+    #expect(day(b, at(2026, 7, 5))!.byFamily.isEmpty)
+    #expect(day(b, at(2026, 7, 9))!.totals.total == 1_000)
 }
 
 @Test func eventsOutsideTheSpanAreExcluded() {
     let events = [
-        event(at(2026, 7, 1), "claude-opus-4-8"),   // 8 days ago — out
-        event(at(2026, 7, 3), "claude-opus-4-8"),   // oldest day in span
+        event(at(2026, 7, 4), "claude-opus-4-8"),   // Saturday, last week — out
+        event(at(2026, 7, 5), "claude-opus-4-8"),   // Sunday, the week's first day
         event(at(2026, 7, 9), "claude-opus-4-8"),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
@@ -84,7 +106,7 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 7, 9), "claude-haiku-4-5"),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
-    let today = b.buckets.last!
+    let today = day(b, at(2026, 7, 9))!
     #expect(today.byFamily.map(\.family) == [.opus, .haiku])
     #expect(today.byFamily.first!.totals.total == 2_000)   // both Opus versions
     #expect(b.models.map(\.displayName).sorted() == ["Haiku 4.5", "Opus 4.7", "Opus 4.8"])
@@ -96,7 +118,7 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 7, 9), "claude-fable-5"),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
-    let yesterday = b.buckets[5], today = b.buckets[6]
+    let yesterday = day(b, at(2026, 7, 8))!, today = day(b, at(2026, 7, 9))!
     #expect(yesterday.total(of: .opus) == 1_000)
     #expect(yesterday.total(of: .fable) == 0)
     #expect(today.total(of: .opus) == 0)
@@ -110,7 +132,7 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 7, 9), "claude-fable-5"),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
-    let yesterday = b.buckets[5], today = b.buckets[6]
+    let yesterday = day(b, at(2026, 7, 8))!, today = day(b, at(2026, 7, 9))!
 
     #expect(yesterday.cost(of: .fable) == 0)
     #expect(today.cost(of: .opus) > 0)
@@ -125,7 +147,7 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 7, 9), "claude-opus-4-8"),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
-    #expect(b.buckets.last!.byFamily.map(\.family) == [.opus, .haiku])
+    #expect(day(b, at(2026, 7, 9))!.byFamily.map(\.family) == [.opus, .haiku])
 }
 
 @Test func modelsSortByCostNotByTokens() {
@@ -195,10 +217,14 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
 
 // MARK: - Previous period
 
-@Test func previousPeriodIsTheEqualLengthWindowEndingWhereThisOneBegins() {
+@Test func aWeekStillRunningIsComparedOnlyAsFarAsItHasGone() {
+    // Thursday noon is four and a half days into the week, so the comparison
+    // reaches four and a half days into the week before — not all seven, or every
+    // Sunday would report a collapse against a finished week.
     let events = [
         event(at(2026, 7, 9), "claude-opus-4-8", input: 500),    // in span
-        event(at(2026, 7, 2), "claude-opus-4-8", input: 300),    // previous 7 days
+        event(at(2026, 6, 30), "claude-opus-4-8", input: 300),   // last week, within reach
+        event(at(2026, 7, 3), "claude-opus-4-8", input: 900),    // last week, past it
         event(at(2026, 6, 25), "claude-opus-4-8", input: 900),   // older still — neither
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
@@ -218,7 +244,7 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
 @Test func changesAreFractionsOfThePreviousValue() {
     let events = [
         event(at(2026, 7, 9), "claude-opus-4-8", input: 1_200),
-        event(at(2026, 7, 2), "claude-opus-4-8", input: 1_000),
+        event(at(2026, 6, 30), "claude-opus-4-8", input: 1_000),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
     #expect(abs((b.tokenChange ?? 0) - 0.2) < 1e-9)
@@ -274,26 +300,43 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
 @Test func todayIsAnHourlyRangeAndTheOthersAreDaily() {
     #expect(UsageRange.today.unit == .hour)
     #expect(UsageRange.today.days == 1)
-    #expect(UsageRange.today.label == "Today")
     for range in UsageRange.allCases where range != .today {
         #expect(range.unit == .day)
     }
 }
 
-@Test func todayBucketsByHourFromMidnightThroughTheCurrentHour() {
-    // 14:30 — fifteen buckets, 00:00 through 14:00. The hours that have not
-    // happened yet are absent, not zero: a zero-filled evening would draw a line
-    // collapsing to the axis for the rest of the day.
+@Test func rangeLabelsNameTheWindowRatherThanADayCount() {
+    // Sunday to Saturday is not "the last 7 days", and a label that says it is
+    // would be describing a window the picker no longer draws.
+    #expect(UsageRange.today.label == "Today")
+    #expect(UsageRange.week.label == "Week")
+    #expect(UsageRange.month.label == "30D")
+    #expect(UsageRange.quarter.label == "90D")
+}
+
+@Test func todayIsAlwaysDrawnMidnightToMidnight() {
+    // 14:30 — all twenty-four hours, so the axis reads the same at breakfast as
+    // it does at bedtime. The evening is there but has not been lived.
     let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
-    #expect(b.buckets.count == 15)
+    #expect(b.buckets.count == 24)
     #expect(b.buckets.first!.start == at(2026, 7, 9, 0, 0))
-    #expect(b.buckets.last!.start == at(2026, 7, 9, 14, 0))
+    #expect(b.buckets.last!.start == at(2026, 7, 9, 23, 0))
+}
+
+@Test func theHoursOfTodayStillToComeAreMarkedFuture() {
+    // What separates them from an idle hour: nothing was used at 3am, and nothing
+    // *can* have been used at 9pm yet. The chart draws the first and not the second.
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
+    #expect(lived(b).count == 15)
+    #expect(lived(b).last!.start == at(2026, 7, 9, 14, 0))
+    #expect(b.buckets.first!.isFuture == false)
+    #expect(b.buckets.last!.isFuture)
 }
 
 @Test func onlyTheHourTheClockIsInsideIsStillAccruing() {
     let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
     #expect(b.buckets.filter(\.isCurrent).count == 1)
-    #expect(b.buckets.last!.isCurrent)
+    #expect(lived(b).last!.isCurrent)
 }
 
 @Test func todayStartsAtMidnightAndExcludesYesterday() {
@@ -305,13 +348,13 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
     #expect(b.totals.total == 500)
     #expect(b.buckets.first!.totals.total == 300)
-    #expect(b.buckets.last!.totals.total == 200)
+    #expect(lived(b).last!.totals.total == 200)
 }
 
 @Test func anIdleHourIsPresentAndEmptyRatherThanAbsent() {
     let events = [event(at(2026, 7, 9, 2, 15), "claude-opus-4-8")]
     let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 4, 30), calendar: cal, range: .today)
-    #expect(b.buckets.count == 5)
+    #expect(lived(b).count == 5)
     #expect(b.buckets[2].totals.total == 1_000)
     #expect(b.buckets[3].byFamily.isEmpty)
     #expect(b.buckets[3].totals.total == 0)
@@ -358,8 +401,9 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
         event(at(2026, 3, 8, 3, 30), "claude-opus-4-8"),
     ]
     let b = UsageBreakdown.make(from: events, now: at(2026, 3, 8, 4, 30), calendar: cal, range: .today)
-    #expect(b.buckets.count == 4)
-    #expect(b.buckets.map(\.totals.total) == [0, 1_000, 1_000, 0])
+    #expect(b.buckets.count == 23)
+    #expect(lived(b).count == 4)
+    #expect(lived(b).map(\.totals.total) == [0, 1_000, 1_000, 0])
     #expect(b.totals.total == 2_000)
 }
 
@@ -368,7 +412,220 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
     // hours, not four. `at(...)` resolves the ambiguous hour to the first pass.
     let b = UsageBreakdown.make(from: [event(at(2026, 11, 1, 1, 30), "claude-opus-4-8")],
                                 now: at(2026, 11, 1, 3, 30), calendar: cal, range: .today)
-    #expect(b.buckets.count == 5)
-    #expect(b.buckets.map(\.totals.total) == [0, 1_000, 0, 0, 0])
-    #expect(b.buckets.last!.isCurrent)
+    #expect(b.buckets.count == 25)
+    #expect(lived(b).count == 5)
+    #expect(lived(b).map(\.totals.total) == [0, 1_000, 0, 0, 0])
+    #expect(lived(b).last!.isCurrent)
+}
+
+// MARK: - Paging back
+
+@Test func offsetShiftsADailyWindowBackWholePeriodsAtATime() {
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal,
+                                range: .month, offset: 1)
+    #expect(b.buckets.count == 30)
+    #expect(b.buckets.first!.start == cal.startOfDay(for: at(2026, 5, 11)))
+    #expect(b.buckets.last!.start == cal.startOfDay(for: at(2026, 6, 9)))
+}
+
+@Test func pagingBackAWeekLandsOnThePreviousCalendarWeek() {
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal,
+                                range: .week, offset: 1)
+    #expect(b.buckets.count == 7)
+    #expect(b.buckets.first!.start == cal.startOfDay(for: at(2026, 6, 28)))
+    #expect(b.buckets.last!.start == cal.startOfDay(for: at(2026, 7, 4)))
+}
+
+@Test func aPagedBackWindowHasNoCurrentBucket() {
+    // Nothing in a finished window is still accruing, so nothing may be dimmed
+    // as if it were.
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal,
+                                range: .week, offset: 1)
+    #expect(b.buckets.filter(\.isCurrent).isEmpty)
+}
+
+@Test func offsetIsCarriedOnTheBreakdownSoTheWindowCanLabelItself() {
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal,
+                                range: .week, offset: 2)
+    #expect(b.offset == 2)
+    #expect(UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal).offset == 0)
+}
+
+@Test func onlyEventsInsideTheShiftedWindowAreCounted() {
+    let events = [
+        event(at(2026, 7, 5), "claude-opus-4-8"),    // in the current week — out
+        event(at(2026, 7, 4), "claude-opus-4-8"),    // newest day of the shifted one
+        event(at(2026, 6, 28), "claude-opus-4-8"),   // oldest day of it
+        event(at(2026, 6, 27), "claude-opus-4-8"),   // one day too early — out
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal,
+                                range: .week, offset: 1)
+    #expect(b.totals.total == 2_000)
+    #expect(b.buckets.first!.totals.total == 1_000)
+    #expect(b.buckets.last!.totals.total == 1_000)
+}
+
+@Test func aPagedBackDailyWindowComparesAgainstTheWindowBeforeIt() {
+    let events = [
+        event(at(2026, 7, 2), "claude-opus-4-8", input: 500),    // drawn week
+        event(at(2026, 6, 25), "claude-opus-4-8", input: 300),   // the week before it
+        event(at(2026, 6, 18), "claude-opus-4-8", input: 900),   // two before — out
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal,
+                                range: .week, offset: 1)
+    #expect(b.totals.total == 500)
+    #expect(b.previous?.totals.total == 300)
+}
+
+@Test func aPagedBackTodayDrawsTheWholeDayNotAnElapsedFragment() {
+    // The clock is not inside July 8 any more, so all 24 of its hours are history.
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal,
+                                range: .today, offset: 1)
+    #expect(b.buckets.count == 24)
+    #expect(b.buckets.first!.start == cal.startOfDay(for: at(2026, 7, 8)))
+    #expect(b.buckets.last!.start == at(2026, 7, 8, 23, 0))
+    #expect(b.buckets.filter(\.isCurrent).isEmpty)
+}
+
+@Test func aPagedBackTodayCountsTheHoursAfterTheCurrentTimeOfDay() {
+    let events = [
+        event(at(2026, 7, 8, 10, 0), "claude-opus-4-8", input: 300),
+        event(at(2026, 7, 8, 20, 0), "claude-opus-4-8", input: 900),   // past 14:30
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 14, 30), calendar: cal,
+                                range: .today, offset: 1)
+    #expect(b.totals.total == 1_200)
+}
+
+@Test func aPagedBackTodayComparesAgainstThePrecedingWholeDay() {
+    // Both windows are finished days, so the comparison is day against day.
+    let events = [
+        event(at(2026, 7, 8, 20, 0), "claude-opus-4-8", input: 500),
+        event(at(2026, 7, 7, 20, 0), "claude-opus-4-8", input: 300),
+        event(at(2026, 7, 6, 20, 0), "claude-opus-4-8", input: 900),   // too early
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 14, 30), calendar: cal,
+                                range: .today, offset: 1)
+    #expect(b.totals.total == 500)
+    #expect(b.previous?.totals.total == 300)
+}
+
+@Test func aPagedBackSpringForwardDayIsDrawnAsTheTwentyThreeHoursItWas() {
+    let b = UsageBreakdown.make(from: [event(at(2026, 3, 8, 1, 30), "claude-opus-4-8")],
+                                now: at(2026, 3, 9, 14, 30), calendar: cal,
+                                range: .today, offset: 1)
+    #expect(b.buckets.count == 23)
+    #expect(b.totals.total == 1_000)
+}
+
+@Test func aPagedBackFallBackDayIsDrawnAsTheTwentyFiveHoursItWas() {
+    let b = UsageBreakdown.make(from: [], now: at(2026, 11, 2, 14, 30), calendar: cal,
+                                range: .today, offset: 1)
+    #expect(b.buckets.count == 25)
+}
+
+@Test func theMonthProjectionStaysOnThisMonthWhilePagedBack() {
+    // A projection forecasts a bill, and the bill being forecast is this month's
+    // however far back the chart has been paged.
+    let events = [event(at(2026, 7, 2), "claude-opus-4-8", input: 1_000_000)]
+    let now = at(2026, 7, 9)
+    let current = UsageBreakdown.make(from: events, now: now, calendar: cal, range: .week)
+    let paged = UsageBreakdown.make(from: events, now: now, calendar: cal, range: .week, offset: 1)
+    #expect(paged.month == current.month)
+}
+
+@Test func howFarBackEachRangeMayPageIsBoundedByTheRetainedHistory() {
+    // Six months of transcripts are kept, so each range may step back as many
+    // whole periods as fit behind the current one.
+    #expect(UsageRange.today.maxOffset == 179)
+    #expect(UsageRange.week.maxOffset == 24)
+    #expect(UsageRange.month.maxOffset == 5)
+    #expect(UsageRange.quarter.maxOffset == 1)
+}
+
+@Test func eachRangeNamesTheStepThePagingButtonsTake() {
+    #expect(UsageRange.today.stepName == "day")
+    #expect(UsageRange.week.stepName == "week")
+    #expect(UsageRange.month.stepName == "30 days")
+    #expect(UsageRange.quarter.stepName == "90 days")
+}
+
+
+// MARK: - Whole periods
+
+@Test func theWeekFollowsTheCalendarsFirstWeekdayRatherThanAFixedSunday() {
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: mondayCal)
+    #expect(b.buckets.count == 7)
+    #expect(mondayCal.component(.weekday, from: b.buckets.first!.start) == mondayCal.firstWeekday)
+    #expect(b.buckets.first!.start == mondayCal.startOfDay(for: at(2026, 7, 6)))
+}
+
+@Test func theDaysOfThisWeekStillToComeAreMarkedFuture() {
+    // Thursday: Sunday through Thursday have been lived, Friday and Saturday
+    // have not. Both are drawn on the axis; only the first five hold a line.
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal)
+    #expect(lived(b).count == 5)
+    #expect(lived(b).last!.start == cal.startOfDay(for: at(2026, 7, 9)))
+    #expect(day(b, at(2026, 7, 10))!.isFuture)
+    #expect(day(b, at(2026, 7, 11))!.isFuture)
+}
+
+@Test func aFinishedWeekHoldsNothingInTheFuture() {
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal,
+                                range: .week, offset: 1)
+    #expect(lived(b).count == 7)
+    #expect(b.buckets.filter(\.isCurrent).isEmpty)
+}
+
+@Test func aFinishedDayHoldsNothingInTheFutureEither() {
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal,
+                                range: .today, offset: 1)
+    #expect(lived(b).count == 24)
+}
+
+@Test func theRollingRangesStillEndOnTodayAndAreFullyLived() {
+    for range in [UsageRange.month, .quarter] {
+        let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9), calendar: cal, range: range)
+        #expect(b.buckets.last!.start == cal.startOfDay(for: at(2026, 7, 9)))
+        #expect(lived(b).count == range.days)
+    }
+}
+
+@Test func aWeekSpanningTheSpringForwardIsStillSevenDays() {
+    // 2026-03-08 is a Sunday and 23 hours long. Stepped by the calendar, the week
+    // it opens is seven days; strided by seconds it would be six and a bit.
+    let b = UsageBreakdown.make(from: [event(at(2026, 3, 8, 12), "claude-opus-4-8")],
+                                now: at(2026, 3, 12), calendar: cal)
+    #expect(b.buckets.count == 7)
+    #expect(b.buckets.first!.start == cal.startOfDay(for: at(2026, 3, 8)))
+    #expect(day(b, at(2026, 3, 8))!.totals.total == 1_000)
+}
+
+@Test func aFinishedWeekIsComparedAgainstThePrecedingWholeWeek() {
+    let events = [
+        event(at(2026, 7, 4), "claude-opus-4-8", input: 500),    // drawn week
+        event(at(2026, 6, 27), "claude-opus-4-8", input: 300),   // the whole week before it
+        event(at(2026, 6, 20), "claude-opus-4-8", input: 900),   // two weeks before — out
+    ]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal,
+                                range: .week, offset: 1)
+    #expect(b.totals.total == 500)
+    #expect(b.previous?.totals.total == 300)
+}
+
+@Test func theDailyAverageDividesByTheDaysTheWindowHasLived() {
+    // Five days into the week, ten messages is two a day — not the one and a bit
+    // that dividing by a week that has not happened yet would report.
+    let events = (0..<10).map { _ in event(at(2026, 7, 9), "claude-opus-4-8") }
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
+    #expect(b.daysElapsed == 5)
+    #expect(b.messagesPerDay == 2)
+}
+
+@Test func aFinishedWeekAveragesOverAllSevenOfItsDays() {
+    let events = (0..<14).map { _ in event(at(2026, 7, 1), "claude-opus-4-8") }
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal,
+                                range: .week, offset: 1)
+    #expect(b.daysElapsed == 7)
+    #expect(b.messagesPerDay == 2)
 }

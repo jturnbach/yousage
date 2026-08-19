@@ -59,3 +59,24 @@ private func rows(_ csv: String) -> [[String]] {
     let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
     #expect(UsageExport.filename(b).hasPrefix("YouSage Today "))
 }
+
+@Test func theFilenameCarriesTheDrawnWindowNotTheDayItWasExported() {
+    // A file named for today holding last week's rows is a file you cannot find
+    // again once a few of them are sitting in ~/Downloads.
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal,
+                                range: .week, offset: 1)
+    #expect(UsageExport.filename(b, timeZone: newYork) == "YouSage Week 2026-07-04.csv")
+}
+
+@Test func theFilenameOfThePresentWindowIsDatedToTheLastDayItHolds() {
+    // The week runs to Saturday, but a file named for a Saturday that has not
+    // happened is a file dated in the future.
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal, range: .week)
+    #expect(UsageExport.filename(b, timeZone: newYork) == "YouSage Week 2026-07-09.csv")
+}
+
+@Test func anExportStopsAtTheLastRowThatHasBeenLived() {
+    // Rows of zeros for hours that have not happened are not data.
+    let b = UsageBreakdown.make(from: [], now: at(2026, 7, 9, 14, 30), calendar: cal, range: .today)
+    #expect(rows(UsageExport.csv(b, timeZone: newYork)).count == 16)   // header + 15 hours
+}

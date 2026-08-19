@@ -18,8 +18,12 @@ enum UsageExport {
         return url
     }
 
-    static func filename(_ breakdown: UsageBreakdown) -> String {
-        let day = breakdown.generatedAt.formatted(.iso8601.year().month().day().dateSeparator(.dash))
+    /// Dated to the newest day the window draws rather than to the moment of
+    /// export, so a file paged back to last week is not named for today. Those two
+    /// are the same day whenever the present window is the one on screen.
+    static func filename(_ breakdown: UsageBreakdown, timeZone: TimeZone = .current) -> String {
+        let day = timestamp(breakdown.lived.last?.start ?? breakdown.generatedAt,
+                            hourly: false, timeZone: timeZone)
         return "YouSage \(breakdown.range.label) \(day).csv"
     }
 
@@ -27,7 +31,7 @@ enum UsageExport {
     /// the app always exports in the zone the buckets were counted in.
     static func csv(_ breakdown: UsageBreakdown, timeZone: TimeZone = .current) -> String {
         let families = ModelFamily.allCases.filter { family in
-            breakdown.buckets.contains { $0.byFamily.contains { $0.family == family } }
+            breakdown.lived.contains { $0.byFamily.contains { $0.family == family } }
         }
         let hourly = breakdown.range.unit == .hour
 
@@ -35,7 +39,10 @@ enum UsageExport {
             [hourly ? "Hour" : "Day"] + families.map(\.displayName)
             + ["Total tokens", "Cost (USD)"]
         ]
-        for bucket in breakdown.buckets {
+        // Only what has been lived: a row of zeros for an hour that has not
+        // happened is not a measurement, and a spreadsheet cannot tell the two
+        // apart once they are both zero.
+        for bucket in breakdown.lived {
             let counts = families.map { family -> String in
                 let tokens = bucket.byFamily.first { $0.family == family }?.totals.total ?? 0
                 return String(tokens)

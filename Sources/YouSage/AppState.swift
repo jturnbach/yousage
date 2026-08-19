@@ -26,6 +26,9 @@ final class AppState: ObservableObject {
     /// How many whole periods back the details window is paged; 0 is the window
     /// the clock is inside. Not persisted, for the same reason the range is not.
     @Published private(set) var usageOffset: Int = 0
+    /// Light, dark, or whatever macOS is doing. Persisted, unlike the range and
+    /// the offset: an appearance is a preference, not a place you navigated to.
+    @Published private(set) var appearance: Appearance = .default
     /// Optional monthly ceiling for the API-list-cost projection, in dollars. nil
     /// hides the budget card entirely — an unset budget is not a budget of zero.
     @Published private(set) var monthlyBudget: Double?
@@ -55,6 +58,7 @@ final class AppState: ObservableObject {
     private static let planKey    = "YouSage.planMode"
     private static let tokensKey  = "YouSage.tokenTracking"
     private static let budgetKey  = "YouSage.monthlyBudget"
+    private static let appearanceKey = "YouSage.appearance"
 
     private init() {
         sessionKey = Keychain.read(account: "sessionKey")
@@ -75,6 +79,10 @@ final class AppState: ObservableObject {
             let stored = UserDefaults.standard.double(forKey: Self.budgetKey)
             monthlyBudget = stored > 0 ? stored : nil
         }
+        appearance = Appearance(stored: UserDefaults.standard.string(forKey: Self.appearanceKey))
+        // `NSApp` is not up yet inside the singleton's initializer; the first
+        // paint has to wait for the run loop either way.
+        DispatchQueue.main.async { [appearance] in Self.apply(appearance) }
 
         registerWorkspaceObservers()
 
@@ -162,6 +170,21 @@ final class AppState: ObservableObject {
             // Re-enabling must show "reading…", not "nothing found".
             hasScannedTokens = false
         }
+    }
+
+    func setAppearance(_ appearance: Appearance) {
+        guard appearance != self.appearance else { return }
+        self.appearance = appearance
+        UserDefaults.standard.set(appearance.rawValue, forKey: Self.appearanceKey)
+        Self.apply(appearance)
+    }
+
+    /// Set on the application rather than through `preferredColorScheme` on each
+    /// root view: this reaches the popover, both windows, and their title bars and
+    /// toolbars at once, where the SwiftUI modifier leaves window chrome on the
+    /// system setting.
+    private static func apply(_ appearance: Appearance) {
+        NSApp?.appearance = appearance.appearanceName.map { NSAppearance(named: $0) } ?? nil
     }
 
     func setUsageRange(_ range: UsageRange) {

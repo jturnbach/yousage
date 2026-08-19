@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 struct UsageSnapshot: Sendable, Equatable {
@@ -161,6 +162,48 @@ enum DetectedPlan: String, Sendable, Equatable {
         case .enterprise:   return "Enterprise / Team"
         case .unknown:      return "Unknown"
         }
+    }
+}
+
+/// Which appearance the app paints itself in.
+///
+/// The window already reads correctly in both — every custom colour forks on the
+/// colour scheme and the rest is system material — so this only decides which one
+/// macOS hands it.
+enum Appearance: String, CaseIterable, Sendable, Identifiable {
+    case system
+    case light
+    case dark
+
+    static let `default`: Appearance = .system
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .system: return "System"
+        case .light:  return "Light"
+        case .dark:   return "Dark"
+        }
+    }
+
+    /// What `NSApp.appearance` is set to. nil for `.system`, and deliberately not
+    /// the system's current appearance resolved once: nil keeps the app following
+    /// macOS as it changes, where a resolved value would freeze it at whatever the
+    /// system happened to be when we looked.
+    var appearanceName: NSAppearance.Name? {
+        switch self {
+        case .system: return nil
+        case .light:  return .aqua
+        case .dark:   return .darkAqua
+        }
+    }
+
+    /// An unreadable or absent stored value follows the system, which is what a
+    /// first launch does — a setting we cannot understand is a setting nobody
+    /// chose.
+    init(stored: String?) {
+        self = stored.flatMap(Appearance.init(rawValue:)) ?? .default
     }
 }
 

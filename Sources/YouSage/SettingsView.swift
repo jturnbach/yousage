@@ -24,6 +24,8 @@ struct SettingsView: View {
                 Divider()
                 planSection
                 Divider()
+                appearanceSection
+                Divider()
                 tokenSection
                 Divider()
                 instructions
@@ -154,6 +156,31 @@ struct SettingsView: View {
             return "Shows your 5-hour session, weekly limits, and any additional limits Anthropic reports — including new ones, which appear automatically. Hides enterprise allotments."
         case .enterprise:
             return "Leads with allotted usage (amount used of the amount granted). Any rate limits your account also reports stay visible below."
+        }
+    }
+
+    // MARK: - Appearance
+
+    private var appearanceSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Appearance")
+                .font(.headline)
+
+            Picker("", selection: Binding(
+                get: { state.appearance },
+                set: { state.setAppearance($0) }
+            )) {
+                ForEach(Appearance.allCases) { appearance in
+                    Text(appearance.displayName).tag(appearance)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Text("System follows the macOS setting, including when it switches with the time of day. The menu bar icon always follows the menu bar's own appearance, whichever you pick here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

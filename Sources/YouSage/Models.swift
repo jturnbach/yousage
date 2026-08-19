@@ -96,6 +96,16 @@ enum NumberFormat {
 
     static func tokens(_ value: Int) -> String { compact(Double(value)) }
 
+    /// Dollars at a glance — for axis ticks, tooltips, and table cells, where a
+    /// column of "$217.06" is four characters of noise per row. Cents survive
+    /// only below $10, which is the scale at which they are the whole number.
+    static func money(_ value: Double) -> String {
+        let abs = Swift.abs(value)
+        if abs >= 1_000 { return "$" + compact(value) }
+        if abs >= 10 || abs == 0 { return "$\(Int(value.rounded()))" }
+        return String(format: "$%.2f", value)
+    }
+
     static func compact(_ value: Double, forceDecimals: Bool = false) -> String {
         let abs = Swift.abs(value)
         switch abs {
@@ -201,24 +211,24 @@ struct TokenTotals: Sendable, Equatable {
     }
 }
 
+/// `claude-opus-4-8` → `Opus 4.8`. Normalizes first, so provider prefixes,
+/// bracketed variants, and date stamps all fall away before formatting.
+func modelDisplayName(_ id: String) -> String {
+    var s = Pricing.normalize(id)
+    if s.hasPrefix("claude-") { s = String(s.dropFirst("claude-".count)) }
+    let parts = s.split(separator: "-").map(String.init)
+    guard let family = parts.first, !family.isEmpty else { return id }
+    let version = parts.dropFirst().joined(separator: ".")
+    let name = family.prefix(1).uppercased() + family.dropFirst()
+    return version.isEmpty ? name : "\(name) \(version)"
+}
+
 struct ModelTokens: Sendable, Equatable, Identifiable {
     let model: String
     let totals: TokenTotals
     var id: String { model }
 
-    /// `claude-opus-4-8` → `Opus 4.8`; unknown ids pass through lightly cleaned.
-    var displayName: String {
-        var s = model
-        for p in ["claude-", "anthropic."] where s.hasPrefix(p) { s = String(s.dropFirst(p.count)) }
-        // Trailing date stamps (`-20251001`) carry no meaning for a human here.
-        let parts = s.split(separator: "-")
-            .map(String.init)
-            .filter { !($0.count == 8 && $0.allSatisfy(\.isNumber)) }
-        guard let family = parts.first else { return model }
-        let version = parts.dropFirst().joined(separator: ".")
-        let name = family.prefix(1).uppercased() + family.dropFirst()
-        return version.isEmpty ? name : "\(name) \(version)"
-    }
+    var displayName: String { modelDisplayName(model) }
 }
 
 /// What a window's tokens would cost at Anthropic's API list prices. YouSage is
@@ -236,6 +246,15 @@ struct CostEstimate: Sendable, Equatable {
     /// "$4.12", or "≥ $27.60" when some of the window couldn't be priced.
     var display: String {
         let money = NumberFormat.amount(amount, unit: "USD")
+        return isComplete ? money : "≥ \(money)"
+    }
+
+    /// Every cent, grouped: "$1,301.42". `display` compacts past $1,000 — which is
+    /// right in the popover, where the figure is a glance, and wrong on the
+    /// dashboard, where "$1.3K" hides the difference between a $1,300 month and a
+    /// $1,349 one.
+    var exactDisplay: String {
+        let money = amount.formatted(.currency(code: "USD"))
         return isComplete ? money : "≥ \(money)"
     }
 }

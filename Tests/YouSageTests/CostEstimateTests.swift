@@ -15,3 +15,25 @@ import Testing
 @Test func anEstimateWithNoUnpricedModelsIsComplete() {
     #expect(CostEstimate(amount: 0).isComplete)
 }
+
+@Test func axisMoneyDropsCentsOnlyWhereTheyAreNotTheWholeNumber() {
+    #expect(NumberFormat.money(0) == "$0")
+    #expect(NumberFormat.money(0.42) == "$0.42")     // cents are the whole figure
+    #expect(NumberFormat.money(9.99) == "$9.99")
+    #expect(NumberFormat.money(217.06) == "$217")    // a tick, not an invoice
+    #expect(NumberFormat.money(1_301.42) == "$1.3K")
+}
+
+@Test func exactDisplayKeepsTheCentsThatCompactDisplayThrowsAway() {
+    var cost = CostEstimate()
+    cost.amount = 1_301.42
+    #expect(cost.display == "$1.3K")            // right for the popover's glance
+    #expect(cost.exactDisplay == "$1,301.42")   // right for the dashboard's figure
+}
+
+@Test func exactDisplayStillMarksAnUnpricedWindowAsALowerBound() {
+    var cost = CostEstimate()
+    cost.amount = 1_301.42
+    cost.unpricedModels = ["claude-mystery-9"]
+    #expect(cost.exactDisplay == "≥ $1,301.42")
+}

@@ -192,6 +192,21 @@ class ScanTests(Fixture):
         self.scanner.scan()
         self.assertEqual(self.ids(), ["early", "late"])
 
+    def test_a_single_scan_stops_at_the_byte_budget(self):
+        self.write("-home-agent-proj/a.jsonl", [turn(f"a{i}") for i in range(10)])
+        self.write("-home-agent-proj/b.jsonl", [turn(f"b{i}") for i in range(10)])
+        line = len(turn("a0")) + 1
+        old = ys.BYTE_BUDGET_PER_SCAN
+        ys.BYTE_BUDGET_PER_SCAN = line * 3 + 5
+        try:
+            self.assertTrue(self.scanner.scan())
+            self.assertEqual(len(self.ids()), 3)
+            self.scanner.scan_all()
+            self.assertEqual(len(self.ids()), 20)
+            self.assertFalse(self.scanner.scan())
+        finally:
+            ys.BYTE_BUDGET_PER_SCAN = old
+
     def test_missing_root_is_harmless(self):
         ys.Scanner(os.path.join(self.tmp.name, "nope")).scan()
 

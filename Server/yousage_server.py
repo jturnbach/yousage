@@ -43,7 +43,10 @@ VERSION = 1
 
 # Mirrors TokenTracker.swift.
 RETENTION = 8 * 24 * 3600
-BYTE_BUDGET_PER_SCAN = 96 * 1024 * 1024
+# TokenTracker caps a scan at 96 MB and lets the next refresh pick up the rest.
+# The server always scans until caught up (scan_all), so the cap here only
+# bounds how much is held in memory at once.
+BYTE_BUDGET_PER_SCAN = 16 * 1024 * 1024
 USAGE_MARKER = b'"usage"'
 
 # A request never triggers more than one scan per this many seconds; anything
@@ -181,12 +184,16 @@ class Scanner:
                 if name.endswith(".jsonl") and not name.startswith("."):
                     yield os.path.join(dirpath, name)
 
-    def scan(self) -> None:
+    def scan(self) -> bool:
+        """One budgeted pass. Returns True when the byte budget ran out, i.e.
+        some transcript still has unread bytes."""
         if not os.path.isdir(self.root):
-            return
+            return False
         cutoff = self.now() - RETENTION
         budget = BYTE_BUDGET_PER_SCAN
         count = 0
+        truncated = False
+        progressed = False
 
         for path in self._walk():
             count += 1
@@ -213,13 +220,27 @@ class Scanner:
 
             if size <= offset or budget <= 0:
                 self.cursors[path] = (offset, identity)
+                truncated = truncated or size > offset
                 continue
+            truncated = truncated or size - offset > budget
             consumed = self._ingest(path, offset, budget)
             budget -= consumed
+            progressed = progressed or consumed > 0
             self.cursors[path] = (offset + consumed, identity)
 
         self.files_scanned = count
         self._prune()
+        # No progress at all means the leftovers are lines still being written
+        # (or one larger than the budget); another pass wouldn't help.
+        return truncated and progressed
+
+    def scan_all(self, max_passes: int = 100) -> None:
+        """Scans until caught up. The Mac app tolerates a budgeted scan seeing
+        only part of a backlog, but a server must not: a client fetching with
+        ?since= would never see older events that turn up on a later pass."""
+        for _ in range(max_passes):
+            if not self.scan():
+                return
 
     def _ingest(self, path: str, offset: int, budget: int) -> int:
         """Reads appended bytes up to the last complete line, so a half-written
@@ -303,12 +324,21 @@ class UsageService:
         self.lock = threading.Lock()
         self.last_scan = 0.0
 
+    def refresh(self) -> None:
+        """Scans unless a scan ran within MIN_SCAN_INTERVAL. Call with the lock."""
+        now = self.now()
+        if now - self.last_scan >= MIN_SCAN_INTERVAL or self.last_scan == 0.0:
+            self.scanner.scan_all()
+            self.last_scan = now
+
+    def warm_up(self) -> None:
+        """Reads the whole backlog before serving, so the first request is quick."""
+        with self.lock:
+            self.refresh()
+
     def payload(self, since: float | None = None) -> dict:
         with self.lock:
-            now = self.now()
-            if now - self.last_scan >= MIN_SCAN_INTERVAL or self.last_scan == 0.0:
-                self.scanner.scan()
-                self.last_scan = now
+            self.refresh()
             events = [e.to_json() for e in self.scanner.recent(since)]
         return {
             "version": VERSION,
@@ -381,6 +411,7 @@ def main() -> None:
     )
     bind = os.environ.get("YOUSAGE_BIND", "127.0.0.1")
     port = int(os.environ.get("YOUSAGE_PORT", "3095"))
+    service.warm_up()
     httpd = ThreadingHTTPServer((bind, port), make_handler(service))
     httpd.daemon_threads = True
     sys.stderr.write(f"yousage-server listening on {bind}:{port}, "

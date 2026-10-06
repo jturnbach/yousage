@@ -302,6 +302,17 @@ struct CostEstimate: Sendable, Equatable {
     }
 }
 
+/// One machine's share of the token windows.
+struct SourceTokens: Sendable, Equatable, Identifiable {
+    /// "local" for this Mac, else the remote source's id (its tailnet DNS name).
+    let id: String
+    /// "This Mac", or the host name the remote source reports.
+    let name: String
+    let isLocal: Bool
+    let session: TokenTotals
+    let week: TokenTotals
+}
+
 struct TokenReport: Sendable, Equatable {
     /// Totals inside the active 5-hour window. Empty when no window is active.
     let session: TokenTotals
@@ -322,6 +333,9 @@ struct TokenReport: Sendable, Equatable {
     let weekCost: CostEstimate
     /// Per-model split for the session window, largest first.
     let models: [ModelTokens]
+    /// This Mac vs each remote source, for both windows. Empty when no remote
+    /// source contributes, so a lone Mac shows no split.
+    let sources: [SourceTokens]
     let filesScanned: Int
     let generatedAt: Date
 

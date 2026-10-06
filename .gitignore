@@ -9,3 +9,4 @@ xcuserdata/
 DerivedData/
 Resources/AppIcon.iconset/
 .superpowers/
+__pycache__/

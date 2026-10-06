@@ -22,17 +22,24 @@ with **allotted usage**.
   with a per-model breakdown. Counted from Claude Code transcripts on this Mac
   (`~/.claude/projects`) and bucketed into the *same* windows claude.ai reports,
   so the numbers line up with the percentages above them.
+- **Remote sources:** Claude Code on your other machines counts too. Any
+  server on your Tailscale tailnet running the small YouSage server
+  (`Server/`) is found automatically and its tokens join the same windows,
+  with a This Mac / server split in the popover. Nothing to configure on the
+  Mac. See [Remote sources](#remote-sources).
 - Pick which metric the menu bar % reflects — highest of all, allotted usage,
   current session, or weekly all-models.
 - Auto-refreshes every 60s in the background, every 15s while the popover is
   open. Pauses on sleep, refreshes on wake.
-- Session key is stored in the macOS Keychain. Network traffic goes only to
-  `claude.ai`.
+- Session key is stored in the macOS Keychain and sent only to `claude.ai`.
+  The only other traffic is to YouSage servers on your own tailnet.
 
-> The token tracker sees Claude Code on **this Mac** only. Conversations in the
-> Claude desktop app, on claude.ai, or on another computer draw down the same
-> limits but leave no local transcript, so they aren't counted. The percentages
-> come from claude.ai and are always complete; the token counts are not.
+> The token tracker sees Claude Code on **this Mac**, plus any remote source
+> it finds on your tailnet. Conversations in the Claude desktop app, on
+> claude.ai, or on a computer without a YouSage server draw down the same
+> limits but leave no transcript YouSage can read, so they aren't counted. The
+> percentages come from claude.ai and are always complete; the token counts
+> are not.
 
 > Unofficial. Not affiliated with Anthropic. Uses undocumented endpoints that
 > the claude.ai web app calls — they can change without notice.
@@ -106,6 +113,39 @@ than dropped, and the **Debug** disclosure inside Settings shows the raw JSON �
 so if your plan uses field names not listed above, they're easy to pin down and
 add.
 
+## Remote sources
+
+Claude Code running on another machine (a home server, a dev box) spends the
+same limits but leaves its transcripts there. Run the YouSage server on that
+machine and the Mac picks it up by itself.
+
+**On the server** (Linux): install `Server/` as a systemd service and publish
+it on the tailnet with `tailscale serve` at `/yousage`. See
+[Server/README.md](Server/README.md). It serves token counts only: no message
+content, paths or project names. Only tailnet users on its allowlist get an
+answer.
+
+**On the Mac:** nothing. YouSage:
+
+1. runs the Tailscale CLI (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`,
+   else `tailscale` on `PATH`) with `status --json`;
+2. takes the peers tagged `tag:server` and probes
+   `https://<peer>.<tailnet>.ts.net/yousage/v1/usage` with a 5-second timeout;
+3. keeps every peer that answers as a source, rediscovering hourly (or a few
+   minutes after a failure). Each source is polled at most every 30 seconds,
+   fetching only events newer than the last ones it holds;
+4. merges a source's events only when its Claude Code is signed in to the
+   **same claude.ai organization** the app reads usage for (the org UUID from
+   `/api/organizations`). A source on a different organization is listed in
+   Settings and ignored;
+5. feeds the events into the same `TokenTracker`, deduplicated by request id,
+   so the windows, cost estimates and model split all include them, and the
+   popover shows a This Mac / server split.
+
+Without Tailscale, or with Tailscale stopped, none of this runs. Settings →
+Remote sources lists what was found and how each source is doing, and has a
+switch to turn remote sources off.
+
 ## Project layout
 
 ```
@@ -114,6 +154,7 @@ Sources/YouSage/         Swift source — App, AppState, ClaudeClient, views
 Resources/Info.plist     LSUIElement bundle metadata
 build.sh                 Build the .app bundle (release, ad-hoc signed)
 install.sh               Build + replace /Applications/YouSage.app + relaunch
+Server/                  Remote source for Linux machines (Python, systemd)
 ```
 
 ## Uninstall

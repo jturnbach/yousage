@@ -241,8 +241,9 @@ struct TokenTrackerView: View {
 
     private static let sourceNote = """
     Tokens counted from Claude Code transcripts stored on this Mac \
-    (~/.claude/projects). Chats in the Claude app, on claude.ai, or on another \
-    computer draw down the same limits but aren't counted here.
+    (~/.claude/projects), plus any YouSage server found on your tailnet \
+    (Settings → Remote sources). Chats in the Claude app or on claude.ai draw \
+    down the same limits but aren't counted here.
 
     Dollar amounts are what these tokens would cost at Anthropic's standard \
     API list prices. You're on a subscription and are not billed for them. \
@@ -272,6 +273,26 @@ struct TokenTrackerView: View {
                 subtitle: nil,
                 totals: report.week,
                 cost: report.weekCost)
+
+            // This Mac vs each remote source; only present once a remote
+            // source contributes.
+            if report.sources.count > 1 {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(report.sources) { source in
+                        HStack(spacing: 4) {
+                            Image(systemName: source.isLocal ? "laptopcomputer" : "server.rack")
+                                .frame(width: 14)
+                            Text(source.name)
+                                .lineLimit(1)
+                            Spacer(minLength: 8)
+                            Text("\(NumberFormat.tokens(source.session.total)) session · \(NumberFormat.tokens(source.week.total)) 7 days")
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
 
             if report.models.count > 1 {
                 Text(report.models.prefix(3)

@@ -28,6 +28,8 @@ struct SettingsView: View {
                 Divider()
                 tokenSection
                 Divider()
+                remoteSection
+                Divider()
                 instructions
                 Divider()
                 debugSection
@@ -196,7 +198,7 @@ struct SettingsView: View {
                 set: { state.setTokenTracking($0) }
             ))
 
-            Text("Counts tokens from Claude Code transcripts stored on this Mac (~/.claude/projects), split by the same 5-hour and weekly windows claude.ai reports. Conversations in the Claude app, on claude.ai, or on another computer consume the same limits but leave no transcript here, so they aren't counted.")
+            Text("Counts tokens from Claude Code transcripts stored on this Mac (~/.claude/projects), and from any remote sources below, split by the same 5-hour and weekly windows claude.ai reports. Conversations in the Claude app or on claude.ai consume the same limits but leave no transcript YouSage can read, so they aren't counted.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -260,6 +262,69 @@ struct SettingsView: View {
         budgetInput = state.monthlyBudget.map { String(format: "%.0f", $0) } ?? ""
     }
 
+    // MARK: - Remote sources
+
+    private var remoteSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Remote sources")
+                .font(.headline)
+
+            Toggle("Count Claude Code on servers in your tailnet", isOn: Binding(
+                get: { state.remoteSourcesEnabled },
+                set: { state.setRemoteSources($0) }
+            ))
+            .disabled(!state.tokenTrackingEnabled)
+
+            Text("YouSage asks Tailscale for online devices tagged tag:server and checks each for a YouSage server. A server's tokens are added only when its Claude Code is signed in to the same organization as this Mac. Nothing to set up here; without Tailscale this does nothing.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if state.tokenTrackingEnabled && state.remoteSourcesEnabled {
+                if state.remoteSources.isEmpty {
+                    Text("No servers found.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    ForEach(state.remoteSources) { source in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Image(systemName: remoteIcon(source.state))
+                                .foregroundStyle(remoteColor(source.state))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(source.name)
+                                    .font(.callout)
+                                Text("\(source.id) · \(source.stateText)")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+                Button("Look again") { state.rediscoverRemoteSources() }
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private func remoteIcon(_ state: RemoteSourceStatus.State) -> String {
+        switch state {
+        case .ok:                return "checkmark.circle.fill"
+        case .waitingForAccount: return "clock"
+        case .accountMismatch:   return "person.crop.circle.badge.xmark"
+        case .failed:            return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func remoteColor(_ state: RemoteSourceStatus.State) -> Color {
+        switch state {
+        case .ok:                return .green
+        case .waitingForAccount: return .secondary
+        case .accountMismatch:   return .secondary
+        case .failed:            return .orange
+        }
+    }
+
     // MARK: - Instructions
 
     private var instructions: some View {
@@ -306,6 +371,11 @@ struct SettingsView: View {
                         Text("Organization UUID: \(uuid)")
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
+                    }
+                    ForEach(state.remoteSources.filter { $0.state == .accountMismatch }) { source in
+                        Text("Remote source \(source.name) (\(source.id)) is signed in to a different Claude organization; its tokens are ignored.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     if let detail = state.lastErrorDetail {
                         Text("Last failed request:")

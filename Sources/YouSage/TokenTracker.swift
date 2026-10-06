@@ -7,10 +7,12 @@ import Foundation
 /// including its exact `usage` block — to `~/.claude/projects/**/*.jsonl`, so
 /// that's where the token counts come from.
 ///
-/// Scope worth being honest about: this sees Claude Code on *this Mac* only.
-/// Conversations in the Claude desktop app, on claude.ai, or on another machine
-/// consume the same limits but leave no transcript here. Treat these numbers as
-/// "tokens Claude Code spent", not "tokens behind the percentages above".
+/// Scope worth being honest about: this sees Claude Code on *this Mac*, plus
+/// any remote source (another machine running `Server/yousage_server.py`) that
+/// `RemoteSources` feeds in through `mergeRemote`. Conversations in the Claude
+/// desktop app or on claude.ai consume the same limits but leave no transcript
+/// anywhere we can read. Treat these numbers as "tokens Claude Code spent", not
+/// "tokens behind the percentages above".
 ///
 /// Rescans are incremental: each file is read from where the last scan stopped,
 /// and files untouched within the retention window are never opened.
@@ -42,6 +44,15 @@ actor TokenTracker {
         let date: Date
         let model: String
         let totals: TokenTotals
+        /// nil for this Mac's own transcripts, else the remote source's id.
+        var source: String? = nil
+    }
+
+    /// Events pulled from one remote source, keyed by event id so a fetch
+    /// overlapping an earlier one replaces rather than adds.
+    private struct RemoteStore {
+        var name: String
+        var events: [String: Event]
     }
 
     private let root: URL
@@ -49,6 +60,7 @@ actor TokenTracker {
     private var events: [Event] = []
     private var seen: Set<String> = []
     private var filesScanned = 0
+    private var remote: [String: RemoteStore] = [:]
 
     init(root: URL? = nil) {
         self.root = root ?? FileManager.default
@@ -71,8 +83,7 @@ actor TokenTracker {
                 weekResetsAt: Date?,
                 now: Date = Date(),
                 calendar: Calendar = .current) -> TokenReport? {
-        guard isAvailable else { return nil }
-        scan()
+        guard let events = currentEvents() else { return nil }
 
         var sessionStart: Date?
         var authoritative = false
@@ -80,7 +91,7 @@ actor TokenTracker {
             sessionStart = resets.addingTimeInterval(-Self.sessionLength)
             authoritative = true
         } else {
-            sessionStart = inferredBlockStart(now: now)
+            sessionStart = inferredBlockStart(events, now: now)
         }
 
         let weekStart: Date? = {
@@ -115,6 +126,7 @@ actor TokenTracker {
             weekStart: weekStart,
             weekCost: costEstimate(weekEvents),
             models: modelSplit(sessionEvents),
+            sources: sourceSplit(session: sessionEvents, week: weekEvents),
             filesScanned: filesScanned,
             generatedAt: now
         )
@@ -128,8 +140,7 @@ actor TokenTracker {
                    offset: Int = 0,
                    now: Date = Date(),
                    calendar: Calendar = .current) -> UsageBreakdown? {
-        guard isAvailable else { return nil }
-        scan()
+        guard let events = currentEvents() else { return nil }
         let usage = events.map { UsageEvent(date: $0.date, model: $0.model, totals: $0.totals) }
         return UsageBreakdown.make(from: usage, now: now, calendar: calendar,
                                    range: range, offset: offset)
@@ -138,12 +149,99 @@ actor TokenTracker {
     /// Every retained day, for the activity grid. Separate from `breakdown`
     /// because it answers a different question: the breakdown is the window the
     /// user paged to, this is all of the history there is, whatever they paged to.
-    /// Both read the same scanned events, so the two can never disagree.
+    /// Both read the same events, remote ones included, so the two can never disagree.
     func history(now: Date = Date(), calendar: Calendar = .current) -> UsageHistory? {
-        guard isAvailable else { return nil }
-        scan()
+        guard let events = currentEvents() else { return nil }
         let usage = events.map { UsageEvent(date: $0.date, model: $0.model, totals: $0.totals) }
         return UsageHistory.make(from: usage, now: now, calendar: calendar)
+    }
+
+    // MARK: - Remote sources
+
+    /// Stores events served by a remote source. `replace` discards what was
+    /// held for the source first (a full fetch); otherwise events are upserted
+    /// by id (an incremental `since` fetch). Returns how many events are now
+    /// held for the source.
+    @discardableResult
+    func mergeRemote(source: String, name: String, events incoming: [RemoteUsageEvent], replace: Bool) -> Int {
+        let cutoff = Date().addingTimeInterval(-Self.retention)
+        var store = (replace ? nil : remote[source]) ?? RemoteStore(name: name, events: [:])
+        store.name = name
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        for r in incoming {
+            // The server already applies parse()'s filters; repeat the cheap
+            // ones so a malformed payload can't inject junk.
+            guard !r.id.isEmpty, !r.model.hasPrefix("<"),
+                  let date = formatter.date(from: r.ts) ?? ClaudeClient.parseISO8601(r.ts),
+                  date >= cutoff
+            else { continue }
+            let totals = TokenTotals(
+                input: max(0, r.input),
+                output: max(0, r.output),
+                cacheCreation: max(0, r.cacheWrite),
+                cacheRead: max(0, r.cacheRead),
+                messages: 1
+            )
+            guard totals.total > 0 else { continue }
+            store.events[r.id] = Event(id: r.id, date: date, model: r.model, totals: totals, source: source)
+        }
+        remote[source] = store
+        return store.events.count
+    }
+
+    func removeRemote(source: String) {
+        remote[source] = nil
+    }
+
+    func removeAllRemote() {
+        remote.removeAll()
+    }
+
+    /// Scans this Mac's transcripts, when there are any, and returns every event
+    /// the windows should count. nil when there is neither a transcript folder
+    /// nor a remote source, which is the "nothing to read" the views show.
+    private func currentEvents() -> [Event]? {
+        let local = isAvailable
+        guard local || !remote.isEmpty else { return nil }
+        if local { scan() } else { prune() }
+        return allEvents()
+    }
+
+    /// Local events plus every remote source's, each API call counted once: an
+    /// id this Mac already holds wins over a remote copy, and among remotes the
+    /// first source in id order wins.
+    private func allEvents() -> [Event] {
+        guard !remote.isEmpty else { return events }
+        var out = events
+        var ids = seen
+        for key in remote.keys.sorted() {
+            guard let store = remote[key] else { continue }
+            for event in store.events.values where !ids.contains(event.id) {
+                out.append(event)
+                ids.insert(event.id)
+            }
+        }
+        return out
+    }
+
+    /// This Mac first, then each remote source by name. Empty when no remote
+    /// source is attached, so a lone Mac shows no split.
+    private func sourceSplit(session: [Event], week: [Event]) -> [SourceTokens] {
+        guard !remote.isEmpty else { return [] }
+        func sum(_ events: [Event], _ source: String?) -> TokenTotals {
+            events.reduce(TokenTotals()) { acc, e in e.source == source ? acc + e.totals : acc }
+        }
+        var out = [SourceTokens(id: "local", name: "This Mac", isLocal: true,
+                                session: sum(session, nil), week: sum(week, nil))]
+        let remotes = remote.sorted {
+            $0.value.name.localizedCaseInsensitiveCompare($1.value.name) == .orderedAscending
+        }
+        for (key, store) in remotes {
+            out.append(SourceTokens(id: key, name: store.name, isLocal: false,
+                                    session: sum(session, key), week: sum(week, key)))
+        }
+        return out
     }
 
     private func modelSplit(_ events: [Event]) -> [ModelTokens] {
@@ -176,7 +274,7 @@ actor TokenTracker {
     /// Claude Code groups activity into 5-hour blocks that begin at the top of the
     /// hour containing the block's first message. Replay the events to find the
     /// block currently in progress; nil when the last block has already expired.
-    private func inferredBlockStart(now: Date) -> Date? {
+    private func inferredBlockStart(_ events: [Event], now: Date) -> Date? {
         let sorted = events.map(\.date).sorted()
         guard let first = sorted.first else { return nil }
 
@@ -321,6 +419,11 @@ actor TokenTracker {
     /// Drop events (and their dedupe keys) that have aged out of every window.
     private func prune() {
         let cutoff = Date().addingTimeInterval(-Self.retention)
+        remote = remote.mapValues { store in
+            var kept = store
+            kept.events = store.events.filter { $0.value.date >= cutoff }
+            return kept
+        }
         guard events.contains(where: { $0.date < cutoff }) else { return }
         var kept: [Event] = []
         kept.reserveCapacity(events.count)

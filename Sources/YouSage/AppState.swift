@@ -18,6 +18,9 @@ final class AppState: ObservableObject {
     @Published private(set) var planMode: PlanMode = .auto
     @Published private(set) var tokenTrackingEnabled: Bool = true
     @Published private(set) var tokenReport: TokenReport?
+    @Published private(set) var remoteSourcesEnabled: Bool = true
+    /// Servers found on the tailnet and how each fared on its last fetch.
+    @Published private(set) var remoteSources: [RemoteSourceStatus] = []
     /// Raw status + body of the most recent failed /usage attempt, surfaced in
     /// the Settings → Debug panel to diagnose plan-specific endpoint issues.
     @Published private(set) var lastErrorDetail: String?
@@ -32,6 +35,10 @@ final class AppState: ObservableObject {
     private var inflight: Task<Void, Never>?
     private var tokenScan: Task<Void, Never>?
     private var lastTokenScan: Date?
+    /// A forced token refresh requested while a scan was in flight; run once
+    /// that scan finishes rather than dropped.
+    private var tokenRefreshPending = false
+    private var remoteRediscoverPending = false
     private var isPopoverOpen = false
 
     private static let orgUUIDKey = "YouSage.orgUUID"
@@ -39,6 +46,7 @@ final class AppState: ObservableObject {
     private static let metricKey  = "YouSage.menuBarMetric"
     private static let planKey    = "YouSage.planMode"
     private static let tokensKey  = "YouSage.tokenTracking"
+    private static let remoteKey  = "YouSage.remoteSources"
 
     private init() {
         sessionKey = Keychain.read(account: "sessionKey")
@@ -54,6 +62,9 @@ final class AppState: ObservableObject {
         }
         if UserDefaults.standard.object(forKey: Self.tokensKey) != nil {
             tokenTrackingEnabled = UserDefaults.standard.bool(forKey: Self.tokensKey)
+        }
+        if UserDefaults.standard.object(forKey: Self.remoteKey) != nil {
+            remoteSourcesEnabled = UserDefaults.standard.bool(forKey: Self.remoteKey)
         }
 
         registerWorkspaceObservers()
@@ -133,6 +144,26 @@ final class AppState: ObservableObject {
         tokenTrackingEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: Self.tokensKey)
         if enabled { refreshTokens(force: true) } else { tokenReport = nil }
+    }
+
+    func setRemoteSources(_ enabled: Bool) {
+        guard enabled != remoteSourcesEnabled else { return }
+        remoteSourcesEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.remoteKey)
+        if enabled {
+            refreshTokens(force: true)
+        } else {
+            remoteSources = []
+            Task { [weak self] in
+                await RemoteSources.shared.reset()
+                self?.refreshTokens(force: true)
+            }
+        }
+    }
+
+    /// Settings → Remote sources → Look again.
+    func rediscoverRemoteSources() {
+        refreshTokens(force: true, rediscover: true)
     }
 
     var highestPercent: Double? {
@@ -234,21 +265,62 @@ final class AppState: ObservableObject {
     ///
     /// `force` bypasses the coalescing window, which a fresh snapshot needs: its
     /// reset times redefine the windows even when no new tokens were written.
-    private func refreshTokens(force: Bool = false) {
-        guard tokenTrackingEnabled, tokenScan == nil else { return }
+    ///
+    /// Remote sources are fetched after the local report is published: their
+    /// discovery runs the Tailscale CLI and probes peers, which can take
+    /// seconds, and the local numbers shouldn't wait on it.
+    private func refreshTokens(force: Bool = false, rediscover: Bool = false) {
+        guard tokenTrackingEnabled else { return }
+        guard tokenScan == nil else {
+            if force { tokenRefreshPending = true }
+            if rediscover { remoteRediscoverPending = true }
+            return
+        }
         if !force, let last = lastTokenScan, Date().timeIntervalSince(last) < 5 { return }
 
         let session = snapshot?.sessionSection?.resetsAt
         let week = snapshot?.weeklyAllSection?.resetsAt
+        let remoteEnabled = remoteSourcesEnabled
+        let org = orgUUID
         tokenScan = Task { [weak self] in
             let report = await TokenTracker.shared.report(sessionResetsAt: session, weekResetsAt: week)
             await MainActor.run {
                 guard let self else { return }
                 self.tokenReport = report
                 self.lastTokenScan = Date()
+            }
+            if remoteEnabled {
+                let result = await RemoteSources.shared.refresh(orgUUID: org, forceDiscovery: rediscover)
+                await self?.applyRemote(result.statuses, changed: result.changed)
+            }
+            await MainActor.run {
+                guard let self else { return }
                 self.tokenScan = nil
+                if self.tokenRefreshPending || self.remoteRediscoverPending {
+                    let again = self.remoteRediscoverPending
+                    self.tokenRefreshPending = false
+                    self.remoteRediscoverPending = false
+                    self.refreshTokens(force: true, rediscover: again)
+                }
             }
         }
+    }
+
+    private func applyRemote(_ statuses: [RemoteSourceStatus], changed: Bool) async {
+        guard tokenTrackingEnabled else { return }
+        guard remoteSourcesEnabled else {
+            // Switched off while the fetch ran, which may have re-added events.
+            await RemoteSources.shared.reset()
+            tokenReport = await TokenTracker.shared.report(
+                sessionResetsAt: snapshot?.sessionSection?.resetsAt,
+                weekResetsAt: snapshot?.weeklyAllSection?.resetsAt)
+            return
+        }
+        remoteSources = statuses
+        guard changed else { return }
+        tokenReport = await TokenTracker.shared.report(
+            sessionResetsAt: snapshot?.sessionSection?.resetsAt,
+            weekResetsAt: snapshot?.weeklyAllSection?.resetsAt)
     }
 
     private func performRefresh() async {

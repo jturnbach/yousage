@@ -39,7 +39,7 @@ actor TokenTracker {
         var created: Date
     }
 
-    private struct Event {
+    private struct Event: Equatable {
         let id: String
         let date: Date
         let model: String
@@ -50,17 +50,31 @@ actor TokenTracker {
 
     /// Events pulled from one remote source, keyed by event id so a fetch
     /// overlapping an earlier one replaces rather than adds.
-    private struct RemoteStore {
+    private struct RemoteStore: Equatable {
         var name: String
         var events: [String: Event]
     }
 
     private let root: URL
     private var cursors: [String: Cursor] = [:]
-    private var events: [Event] = []
+    private var events: [Event] = [] { didSet { dataChanged() } }
     private var seen: Set<String> = []
     private var filesScanned = 0
-    private var remote: [String: RemoteStore] = [:]
+    private var remote: [String: RemoteStore] = [:] { didSet { dataChanged() } }
+
+    /// Bumped whenever the events any window counts change, so a caller can
+    /// tell a fetch that brought something new from one that re-sent what was
+    /// already held.
+    private(set) var dataVersion = 0
+    /// `allEvents()`, and the same events as `UsageEvent`s, built once per
+    /// change rather than once per window drawn: merging and converting every
+    /// remote event was a fixed cost on every range switch.
+    private var merged: (events: [Event], usage: [UsageEvent])?
+
+    private func dataChanged() {
+        dataVersion &+= 1
+        merged = nil
+    }
 
     init(root: URL? = nil) {
         self.root = root ?? FileManager.default
@@ -136,14 +150,15 @@ actor TokenTracker {
     /// window from `report`'s rolling week: a bar labelled "Fri" must be Friday,
     /// so the two totals will not agree, and each is labelled with the window it
     /// describes.
+    ///
+    /// `rescan: false` buckets the events already held without walking the
+    /// transcript folder — what a range switch needs, since only the window moved.
     func breakdown(range: UsageRange = .week,
                    offset: Int = 0,
                    now: Date = Date(),
-                   calendar: Calendar = .current) -> UsageBreakdown? {
-        guard let events = currentEvents() else { return nil }
-        let usage = events.map {
-            UsageEvent(date: $0.date, model: $0.model, totals: $0.totals, source: $0.source)
-        }
+                   calendar: Calendar = .current,
+                   rescan: Bool = true) -> UsageBreakdown? {
+        guard currentEvents(rescan: rescan) != nil, let usage = merged?.usage else { return nil }
         return UsageBreakdown.make(from: usage, now: now, calendar: calendar,
                                    range: range, offset: offset,
                                    sourceNames: remote.mapValues(\.name))
@@ -154,8 +169,7 @@ actor TokenTracker {
     /// user paged to, this is all of the history there is, whatever they paged to.
     /// Both read the same events, remote ones included, so the two can never disagree.
     func history(now: Date = Date(), calendar: Calendar = .current) -> UsageHistory? {
-        guard let events = currentEvents() else { return nil }
-        let usage = events.map { UsageEvent(date: $0.date, model: $0.model, totals: $0.totals) }
+        guard currentEvents() != nil, let usage = merged?.usage else { return nil }
         return UsageHistory.make(from: usage, now: now, calendar: calendar)
     }
 
@@ -176,7 +190,8 @@ actor TokenTracker {
             // The server already applies parse()'s filters; repeat the cheap
             // ones so a malformed payload can't inject junk.
             guard !r.id.isEmpty, !r.model.hasPrefix("<"),
-                  let date = formatter.date(from: r.ts) ?? ClaudeClient.parseISO8601(r.ts),
+                  let date = Self.parseServerStamp(r.ts)
+                    ?? formatter.date(from: r.ts) ?? ClaudeClient.parseISO8601(r.ts),
                   date >= cutoff
             else { continue }
             let totals = TokenTotals(
@@ -189,8 +204,44 @@ actor TokenTracker {
             guard totals.total > 0 else { continue }
             store.events[r.id] = Event(id: r.id, date: date, model: r.model, totals: totals, source: source)
         }
-        remote[source] = store
+        // A poll re-sends the last few minutes; storing an identical copy would
+        // count as a change and redraw every window for nothing.
+        if remote[source] != store { remote[source] = store }
         return store.events.count
+    }
+
+    /// The server's own stamp, `2026-07-14T09:30:05.123Z`, read without a
+    /// formatter: a full fetch carries months of events, and parsing each through
+    /// `ISO8601DateFormatter` held the tracker — and every window waiting on it —
+    /// for most of a second. Any other shape returns nil for the formatter to read.
+    static func parseServerStamp(_ stamp: String) -> Date? {
+        var stamp = stamp
+        return stamp.withUTF8 { u -> Date? in
+            guard u.count == 24, u[4] == 0x2D, u[7] == 0x2D, u[10] == 0x54, u[13] == 0x3A,
+                  u[16] == 0x3A, u[19] == 0x2E, u[23] == 0x5A else { return nil }
+            func number(_ digits: Range<Int>) -> Int? {
+                var value = 0
+                for i in digits {
+                    guard (0x30...0x39).contains(u[i]) else { return nil }
+                    value = value * 10 + Int(u[i] - 0x30)
+                }
+                return value
+            }
+            guard let y = number(0..<4), let mo = number(5..<7), let d = number(8..<10),
+                  let h = number(11..<13), let mi = number(14..<16), let s = number(17..<19),
+                  let ms = number(20..<23),
+                  (1...12).contains(mo), (1...31).contains(d), h < 24, mi < 60, s < 60
+            else { return nil }
+            // Days since 1970-01-01 in the proleptic Gregorian calendar
+            // (Hinnant's days_from_civil); the stamp is UTC, so no zone applies.
+            let year = mo <= 2 ? y - 1 : y
+            let era = year / 400
+            let yoe = year - era * 400
+            let doy = (153 * ((mo + 9) % 12) + 2) / 5 + d - 1
+            let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
+            return Date(timeIntervalSince1970: Double(days * 86_400 + h * 3_600 + mi * 60 + s)
+                        + Double(ms) / 1_000)
+        }
     }
 
     func removeRemote(source: String) {
@@ -204,11 +255,16 @@ actor TokenTracker {
     /// Scans this Mac's transcripts, when there are any, and returns every event
     /// the windows should count. nil when there is neither a transcript folder
     /// nor a remote source, which is the "nothing to read" the views show.
-    private func currentEvents() -> [Event]? {
+    private func currentEvents(rescan: Bool = true) -> [Event]? {
         let local = isAvailable
         guard local || !remote.isEmpty else { return nil }
-        if local { scan() } else { prune() }
-        return allEvents()
+        if rescan { if local { scan() } else { prune() } }
+        if let merged { return merged.events }
+        let events = allEvents()
+        merged = (events, events.map {
+            UsageEvent(date: $0.date, model: $0.model, totals: $0.totals, source: $0.source)
+        })
+        return events
     }
 
     /// Local events plus every remote source's, each API call counted once: an
@@ -422,10 +478,14 @@ actor TokenTracker {
     /// Drop events (and their dedupe keys) that have aged out of every window.
     private func prune() {
         let cutoff = Date().addingTimeInterval(-Self.retention)
-        remote = remote.mapValues { store in
-            var kept = store
-            kept.events = store.events.filter { $0.value.date >= cutoff }
-            return kept
+        // Only rebuilt when something has aged out, which leaves the merged
+        // events cached between scans.
+        if remote.values.contains(where: { $0.events.values.contains { $0.date < cutoff } }) {
+            remote = remote.mapValues { store in
+                var kept = store
+                kept.events = store.events.filter { $0.value.date >= cutoff }
+                return kept
+            }
         }
         guard events.contains(where: { $0.date < cutoff }) else { return }
         var kept: [Event] = []

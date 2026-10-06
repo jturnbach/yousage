@@ -318,6 +318,7 @@ actor RemoteSources {
             return true
         }
 
+        let version = await TokenTracker.shared.dataVersion
         status.eventCount = await TokenTracker.shared.mergeRemote(
             source: host, name: status.name, events: payload.events, replace: since == nil)
         if let latest = Self.newestDate(payload.events), latest > (newest[host] ?? .distantPast) {
@@ -327,7 +328,9 @@ actor RemoteSources {
         }
         status.state = .ok
         statuses[host] = status
-        return since == nil || !payload.events.isEmpty
+        // Not "the payload was non-empty": `since` overlaps the last fetch, so
+        // nearly every poll re-sends events already held.
+        return await TokenTracker.shared.dataVersion != version
     }
 
     /// `tserver.tail1234.ts.net` → `tserver`, until the server names itself.

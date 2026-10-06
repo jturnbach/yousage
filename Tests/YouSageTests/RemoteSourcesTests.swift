@@ -171,3 +171,37 @@ private func transcriptRoot(_ turns: [(id: String, minutesAgo: Double)]) throws 
     #expect(RemoteSources.taggedPeers(statusJSON: Data("not json".utf8)) == nil)
     #expect(RemoteSources.taggedPeers(statusJSON: Data(#"{"BackendState":"Running"}"#.utf8)) == [])
 }
+
+@Test func theServerStampIsReadExactlyAsTheFormatterReadsIt() {
+    let f = ISO8601DateFormatter()
+    f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    let stamps = ["1970-01-01T00:00:00.000Z", "2000-02-29T23:59:59.999Z", "2026-03-08T07:30:00.125Z",
+                  "2026-12-31T12:00:00.500Z", "2100-03-01T00:00:00.001Z"]
+        + (0..<200).map { i in f.string(from: Date(timeIntervalSince1970: 1.7e9 + Double(i) * 97_531.237)) }
+    for stamp in stamps {
+        let fast = TokenTracker.parseServerStamp(stamp)
+        let slow = f.date(from: stamp)
+        #expect(fast != nil && slow != nil, "\(stamp)")
+        if let fast, let slow {
+            #expect(abs(fast.timeIntervalSince(slow)) < 0.000_5, "\(stamp)")
+        }
+    }
+    // Anything but the server's exact shape is left to the formatter.
+    for other in ["2026-07-14T09:30:05Z", "2026-07-14T09:30:05.123+02:00", "2026-13-01T00:00:00.000Z",
+                  "yesterday", "2026-07-14 09:30:05.123Z"] {
+        #expect(TokenTracker.parseServerStamp(other) == nil, "\(other)")
+    }
+}
+
+@Test func aPollThatReSendsHeldEventsIsNotAChange() async throws {
+    let tracker = TokenTracker(root: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
+    let a = remoteEvent("a", minutesAgo: 30)
+    await tracker.mergeRemote(source: "s", name: "S", events: [a], replace: true)
+    let version = await tracker.dataVersion
+    // The `since` overlap: the same event again, incrementally and in full.
+    await tracker.mergeRemote(source: "s", name: "S", events: [a], replace: false)
+    await tracker.mergeRemote(source: "s", name: "S", events: [a], replace: true)
+    #expect(await tracker.dataVersion == version)
+    await tracker.mergeRemote(source: "s", name: "S", events: [a, remoteEvent("b", minutesAgo: 1)], replace: false)
+    #expect(await tracker.dataVersion != version)
+}

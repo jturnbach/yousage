@@ -1,0 +1,70 @@
+# YouSage remote source: serves this machine's Claude Code token usage to the
+# YouSage menu bar app over `tailscale serve`. Installed by Server/install.sh.
+[Unit]
+Description=YouSage remote usage source (Claude Code token counts)
+After=network.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/yousage-server/yousage_server.py
+Environment=YOUSAGE_BIND=127.0.0.1
+Environment=YOUSAGE_PORT=3095
+Environment=YOUSAGE_ALLOW=jturnbach524@gmail.com
+Environment=YOUSAGE_PROJECTS=/home/agent/.claude/projects
+Environment=YOUSAGE_CLAUDE_JSON=/home/agent/.claude.json
+# Optional overrides (e.g. a longer YOUSAGE_ALLOW) without editing this file.
+EnvironmentFile=-/etc/yousage-server.env
+Restart=on-failure
+RestartSec=5
+
+# --- Filesystem: everything read-only; of /home only the two inputs exist. ---
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/agent/.claude/projects
+# A file bind pins the inode current at start. Claude Code rewrites this file
+# by rename, so the service keeps reading the start-time copy. Only the two
+# account UUIDs are read from it, and they don't change without a re-login
+# (restart the service after one).
+BindReadOnlyPaths=/home/agent/.claude.json
+ReadOnlyPaths=/home/agent/.claude/projects /home/agent/.claude.json
+PrivateTmp=yes
+PrivateDevices=yes
+UMask=0077
+
+# --- Privileges ---
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RemoveIPC=yes
+
+# --- Kernel and system surface ---
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# --- Network: loopback only (tailscale serve proxies from 127.0.0.1). ---
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+# --- Resources ---
+MemoryMax=256M
+TasksMax=32
+
+[Install]
+WantedBy=multi-user.target

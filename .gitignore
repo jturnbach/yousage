@@ -8,3 +8,4 @@ Package.resolved
 xcuserdata/
 DerivedData/
 Resources/AppIcon.iconset/
+__pycache__/

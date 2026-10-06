@@ -149,7 +149,7 @@ class ScanTests(Fixture):
 
     def test_stale_unread_files_are_skipped_but_tailed(self):
         path = self.write("-home-agent-proj/old.jsonl", [turn("old")])
-        old = self.clock - 9 * 24 * 3600
+        old = self.clock - 182 * 24 * 3600
         os.utime(path, (old, old))
         self.scanner.scan()
         self.assertEqual(self.ids(), [])
@@ -166,18 +166,18 @@ class ScanTests(Fixture):
         self.assertEqual(self.ids(), ["ok"])
         self.assertEqual(self.scanner.files_scanned, 1)
 
-    def test_retention_keeps_eight_days(self):
+    def test_retention_keeps_181_days(self):
         self.write("-home-agent-proj/a.jsonl", [
-            turn("too-old", ts=stamp(timedelta(days=-8, minutes=-1))),
-            turn("seven-days", ts=stamp(timedelta(days=-7, hours=-12))),
+            turn("too-old", ts=stamp(timedelta(days=-181, minutes=-1))),
+            turn("180-days", ts=stamp(timedelta(days=-180, hours=-12))),
             turn("today", ts=stamp(timedelta(hours=-1))),
         ])
         self.scanner.scan()
-        self.assertEqual(self.ids(), ["seven-days", "today"])
+        self.assertEqual(self.ids(), ["180-days", "today"])
         self.assertNotIn("too-old", self.scanner.seen)
 
     def test_events_age_out_as_the_clock_moves(self):
-        self.write("-home-agent-proj/a.jsonl", [turn("r1", ts=stamp(timedelta(days=-7)))])
+        self.write("-home-agent-proj/a.jsonl", [turn("r1", ts=stamp(timedelta(days=-180)))])
         self.scanner.scan()
         self.assertEqual(self.ids(), ["r1"])
         self.clock += 2 * 24 * 3600

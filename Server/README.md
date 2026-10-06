@@ -5,7 +5,7 @@ machine — a home server, a dev box — alongside the ones spent on the Mac.
 
 `yousage_server.py` scans that machine's Claude Code transcripts
 (`~/.claude/projects/**/*.jsonl`) exactly the way the app's `TokenTracker`
-does (same fields, same dedupe key, incremental by file offset, 8-day
+does (same fields, same dedupe key, incremental by file offset, 181-day
 retention) and serves the events as JSON. Python 3 standard library only.
 
 ## API
@@ -26,7 +26,7 @@ case the proxy strips its mount path):
 }
 ```
 
-- `events`: one per API call in the last 8 days (or since `since`), oldest
+- `events`: one per API call in the last 181 days (or since `since`), oldest
   first. `id` is the transcript's `requestId` (message id as fallback) — the
   same dedupe key the app uses.
 - `account`: the two UUIDs from Claude Code's `oauthAccount` in

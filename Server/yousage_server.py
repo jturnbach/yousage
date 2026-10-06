@@ -3,7 +3,7 @@
 
 Scans Claude Code transcripts (~/.claude/projects/**/*.jsonl) exactly the way
 the Mac app's TokenTracker does — same fields, same dedupe key, incremental by
-byte offset, 8-day retention — and serves the resulting events as JSON at
+byte offset, 181-day retention — and serves the resulting events as JSON at
 GET /yousage/v1/usage (optionally ?since=<ISO 8601>), so the Mac can bucket them into its own windows.
 
 Only token counts leave this machine: never message content, file paths or
@@ -41,8 +41,9 @@ from urllib.parse import parse_qs, urlsplit
 
 VERSION = 1
 
-# Mirrors TokenTracker.swift.
-RETENTION = 8 * 24 * 3600
+# Mirrors TokenTracker.swift: UsageRange.historyDays (180) plus a day, so the
+# Mac's longest ranges and its activity grid see this machine's history too.
+RETENTION = 181 * 24 * 3600
 # TokenTracker caps a scan at 96 MB and lets the next refresh pick up the rest.
 # The server always scans until caught up (scan_all), so the cap here only
 # bounds how much is held in memory at once.

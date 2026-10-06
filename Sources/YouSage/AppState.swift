@@ -56,6 +56,7 @@ final class AppState: ObservableObject {
     private var pollTask: Task<Void, Never>?
     private var inflight: Task<Void, Never>?
     private var tokenScan: Task<Void, Never>?
+    private var rebucketTask: Task<Void, Never>?
     private var lastTokenScan: Date?
     /// A forced token refresh requested while a scan was in flight; run once
     /// that scan finishes rather than dropped.
@@ -209,10 +210,8 @@ final class AppState: ObservableObject {
         // Five weeks back is not five months back, so a period count means nothing
         // once the period changes length. Changing the range returns to the present.
         usageOffset = 0
-        // The events are already in memory; only the bucketing changes. Force it,
-        // or the 5-second coalescing window would swallow a range the user just
-        // clicked and leave the old one on screen.
-        refreshTokens(force: true)
+        // The events are already in memory; only the bucketing changes.
+        rebucket()
     }
 
     /// Pages the details window by whole periods — negative is further back,
@@ -226,7 +225,35 @@ final class AppState: ObservableObject {
         let clamped = min(max(offset, 0), usageRange.maxOffset)
         guard clamped != usageOffset else { return }
         usageOffset = clamped
-        refreshTokens(force: true)
+        rebucket()
+    }
+
+    /// The breakdown for the range and page just picked. Only the bucketing:
+    /// no rescan, no report, no remote fetch — and not queued behind a refresh,
+    /// which can be waiting seconds on a remote source. The latest pick wins; an
+    /// answer for an earlier one is dropped.
+    private func rebucket() {
+        guard tokenTrackingEnabled else { return }
+        let range = usageRange
+        let offset = usageOffset
+        rebucketTask?.cancel()
+        rebucketTask = Task { [weak self] in
+            let breakdown = await TokenTracker.shared.breakdown(range: range, offset: offset, rescan: false)
+            guard let self, !Task.isCancelled, self.tokenTrackingEnabled,
+                  self.usageRange == range, self.usageOffset == offset else { return }
+            self.usageBreakdown = breakdown
+        }
+    }
+
+    /// Publishes a breakdown computed for `range`/`offset` unless the window has
+    /// since moved, in which case the moved-to window is bucketed instead —
+    /// a refresh that started before a click must not put the old range back.
+    private func publishBreakdown(_ breakdown: UsageBreakdown?, range: UsageRange, offset: Int) {
+        if usageRange == range && usageOffset == offset {
+            usageBreakdown = breakdown
+        } else {
+            rebucket()
+        }
     }
 
     /// A budget of zero or less is not a budget — it clears the setting instead of
@@ -392,7 +419,7 @@ final class AppState: ObservableObject {
             await MainActor.run {
                 guard let self else { return }
                 self.tokenReport = report
-                self.usageBreakdown = breakdown
+                self.publishBreakdown(breakdown, range: range, offset: offset)
                 self.usageHistory = history
                 self.hasScannedTokens = true
                 self.lastTokenScan = Date()
@@ -422,7 +449,8 @@ final class AppState: ObservableObject {
             await republishTokens()
             return
         }
-        remoteSources = statuses
+        // Every poll lands here; an unchanged list must not redraw the windows.
+        if remoteSources != statuses { remoteSources = statuses }
         guard changed else { return }
         await republishTokens()
     }
@@ -436,7 +464,8 @@ final class AppState: ObservableObject {
         tokenReport = await TokenTracker.shared.report(
             sessionResetsAt: snapshot?.sessionSection?.resetsAt,
             weekResetsAt: snapshot?.weeklyAllSection?.resetsAt)
-        usageBreakdown = await TokenTracker.shared.breakdown(range: range, offset: offset)
+        publishBreakdown(await TokenTracker.shared.breakdown(range: range, offset: offset),
+                         range: range, offset: offset)
         usageHistory = await TokenTracker.shared.history()
     }
 

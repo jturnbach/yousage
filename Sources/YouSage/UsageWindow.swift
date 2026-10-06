@@ -7,6 +7,10 @@ struct UsageWindow: View {
     /// Tokens is the default because it is the measure that exists — the dollars
     /// are a what-if at API list prices, and this is a subscription tool.
     @State private var metric: TrendMetric = .tokens
+    /// The onion skin, on by default: the question "more or less than last week?"
+    /// is the one a usage chart is opened to answer, and an overlay nobody
+    /// discovers answers it for nobody.
+    @State private var onionSkin = true
     @State private var exportError: String?
 
     var body: some View {
@@ -28,12 +32,11 @@ struct UsageWindow: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let breakdown = state.usageBreakdown {
-                if breakdown.totals.messages == 0 {
-                    message(Self.emptyTitle(breakdown),
-                            "Nothing in ~/.claude/projects falls inside this window.") { EmptyView() }
-                } else {
-                    dashboard(breakdown)
-                }
+                // An idle window is still a window: it draws as the same dashboard
+                // reading zero. Replacing the page with "no activity" would hide
+                // the range picker's own answer behind a wall of nothing, and make
+                // a quiet week look like a broken app.
+                dashboard(breakdown)
             } else {
                 message("No Claude Code transcripts found",
                         "YouSage looks in ~/.claude/projects. Chats in the Claude app or on "
@@ -118,17 +121,6 @@ struct UsageWindow: View {
         }
     }
 
-    /// The drawn window is empty. Which window that is lives in the subtitle, so
-    /// the title only has to say whether the period is still running.
-    static func emptyTitle(_ breakdown: UsageBreakdown) -> String {
-        guard breakdown.offset == 0 else { return "No activity in this period" }
-        switch breakdown.range {
-        case .today: return "No activity today yet"
-        case .week:  return "No activity this week"
-        default:     return "No activity in the last \(breakdown.range.days) days"
-        }
-    }
-
     // MARK: - Page
 
     private func dashboard(_ breakdown: UsageBreakdown) -> some View {
@@ -155,6 +147,9 @@ struct UsageWindow: View {
                              padding: EdgeInsets(top: 15, leading: 18, bottom: 15, trailing: 18)) {
                         TokenKindList(kinds: breakdown.kinds)
                     }
+                    if let history = state.usageHistory {
+                        historyCard(history)
+                    }
 
                     if !breakdown.cost.isComplete {
                         Text("Costs exclude \(breakdown.cost.unpricedModels.joined(separator: ", ")) — "
@@ -169,6 +164,53 @@ struct UsageWindow: View {
             }
             .padding(EdgeInsets(top: 18, leading: 20, bottom: 20, trailing: 20))
         }
+    }
+
+    // MARK: - History
+
+    /// The long view, and the one card the range picker does not move — so it
+    /// sits last, under everything the picker does move, and says so in its own
+    /// heading rather than leaving the reader to discover it by clicking.
+    private func historyCard(_ history: UsageHistory) -> some View {
+        DashCard(padding: EdgeInsets(top: 15, leading: 18, bottom: 15, trailing: 18)) {
+            HStack(spacing: 12) {
+                Text("Every day since \(Self.historyStart(history))")
+                    .font(.system(size: 14, weight: .semibold))
+                    .tracking(-0.14)
+                    .fixedSize()
+                Spacer(minLength: 8)
+                HeatLegend()
+            }
+            ActivityGrid(days: history.days, metric: metric)
+                .padding(.top, 2)
+            CardFootnote(text: Self.historyFootnote(history, metric: metric))
+                .padding(.top, 4)
+        }
+    }
+
+    /// Names the oldest day drawn, because "the last 180 days" is a figure the
+    /// reader has to do arithmetic on and a date is one they can just read.
+    static func historyStart(_ history: UsageHistory) -> String {
+        guard let first = history.days.first?.start else { return "today" }
+        return first.formatted(.dateTime.month(.abbreviated).day())
+    }
+
+    /// What the grid adds up to, and where its darkest cell is — the two things
+    /// a wall of colour cannot say on its own. Also the honest note about depth:
+    /// the grid stops where the transcripts do, which is not where usage did.
+    static func historyFootnote(_ history: UsageHistory, metric: TrendMetric) -> String {
+        let kept = "\(history.days.count) days kept"
+        guard !history.isEmpty,
+              let busiest = history.days.max(by: { metric.value($0) < metric.value($1) }),
+              metric.value(busiest) > 0 else {
+            return "Nothing in the \(kept) of transcripts"
+        }
+        let total = metric == .tokens
+            ? metric.describe(Double(history.totals.total))
+            : history.cost.exactDisplay
+        let day = busiest.start.formatted(.dateTime.month(.abbreviated).day())
+        return "\(total) across \(history.activeDays) of \(kept) · "
+            + "busiest \(day) at \(metric.describe(metric.value(busiest)))"
     }
 
     // MARK: - Hero
@@ -226,7 +268,11 @@ struct UsageWindow: View {
         case (.week, _):  period = "the week before"
         default:          period = "previous \(breakdown.range.days) days"
         }
-        guard let previous = breakdown.previous else { return "no activity \(period)" }
+        // The previous period can be present for the overlay's sake while the
+        // slice the chips compare against is still empty — see `previousPeriod`.
+        guard let previous = breakdown.previous, previous.totals.total > 0 else {
+            return "no activity \(period)"
+        }
         return "vs. \(NumberFormat.tokens(previous.totals.total)) \(period)"
     }
 
@@ -256,7 +302,9 @@ struct UsageWindow: View {
                     .tracking(-0.14)
                     .fixedSize()
                 Spacer(minLength: 8)
-                ModelLegend(families: families(in: breakdown))
+                ModelLegend(families: families(in: breakdown),
+                            previousName: onion(breakdown).isEmpty ? nil : breakdown.range.previousName,
+                            showsTotal: !onion(breakdown).isEmpty && families(in: breakdown).count > 1)
                 Picker("Metric", selection: $metric) {
                     ForEach(TrendMetric.allCases) { metric in
                         Text(metric.label).tag(metric)
@@ -274,22 +322,43 @@ struct UsageWindow: View {
                 .labelsHidden()
                 .fixedSize()
                 .help(showTable ? "Show the chart" : "Show the numbers")
+
+                Toggle(isOn: $onionSkin) {
+                    Image(systemName: "square.on.square.dashed")
+                }
+                .toggleStyle(.button)
+                .disabled(breakdown.previous?.buckets.isEmpty ?? true)
+                .help(breakdown.previous == nil
+                      ? "No \(breakdown.range.previousName.lowercased()) on this Mac to compare with"
+                      : "Overlay \(breakdown.range.previousName.lowercased())")
             }
 
             if showTable {
                 // The table lists measurements, so it stops where they do; the
                 // chart takes the whole window because its axis spans it.
                 UsageTable(buckets: breakdown.lived,
+                           previous: onion(breakdown),
+                           previousName: breakdown.range.previousName,
                            families: families(in: breakdown),
                            metric: metric,
                            unit: breakdown.range.unit)
             } else {
                 TrendChart(buckets: breakdown.buckets,
+                           previous: onion(breakdown),
                            families: families(in: breakdown),
                            metric: metric,
-                           unit: breakdown.range.unit)
+                           unit: breakdown.range.unit,
+                           previousName: breakdown.range.previousName)
             }
         }
+    }
+
+    /// The previous period's buckets when the overlay is on and there are any —
+    /// empty otherwise, which is how the chart, the legend, and the table are all
+    /// told the overlay is off. One switch, read in one place.
+    private func onion(_ breakdown: UsageBreakdown) -> [UsageBucket] {
+        guard onionSkin else { return [] }
+        return breakdown.previous?.buckets ?? []
     }
 
     /// Only families that actually appear, in declaration order, so neither the

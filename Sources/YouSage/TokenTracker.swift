@@ -67,11 +67,12 @@ actor TokenTracker {
     /// with the percentages shown above them. Without them the session window is
     /// inferred from local activity the way Claude Code blocks it: the first
     /// message of a block, floored to the hour, plus five hours.
-    func report(sessionResetsAt: Date?, weekResetsAt: Date?) -> TokenReport? {
+    func report(sessionResetsAt: Date?,
+                weekResetsAt: Date?,
+                now: Date = Date(),
+                calendar: Calendar = .current) -> TokenReport? {
         guard isAvailable else { return nil }
         scan()
-
-        let now = Date()
 
         var sessionStart: Date?
         var authoritative = false
@@ -97,11 +98,19 @@ actor TokenTracker {
             events.filter { $0.date >= start && $0.date <= now }
         } ?? []
 
+        // Local midnight, through the machine's own calendar — the same boundary
+        // the details window draws its days on, so the popover's "Today" and the
+        // grid's last cell are the same number.
+        let dayStart = calendar.startOfDay(for: now)
+        let dayEvents = events.filter { $0.date >= dayStart && $0.date <= now }
+
         return TokenReport(
             session: sessionEvents.reduce(TokenTotals()) { $0 + $1.totals },
             sessionStart: sessionEvents.isEmpty ? nil : sessionStart,
             sessionIsAuthoritative: authoritative,
             sessionCost: costEstimate(sessionEvents),
+            today: dayEvents.reduce(TokenTotals()) { $0 + $1.totals },
+            todayCost: costEstimate(dayEvents),
             week: weekEvents.reduce(TokenTotals()) { $0 + $1.totals },
             weekStart: weekStart,
             weekCost: costEstimate(weekEvents),
@@ -124,6 +133,17 @@ actor TokenTracker {
         let usage = events.map { UsageEvent(date: $0.date, model: $0.model, totals: $0.totals) }
         return UsageBreakdown.make(from: usage, now: now, calendar: calendar,
                                    range: range, offset: offset)
+    }
+
+    /// Every retained day, for the activity grid. Separate from `breakdown`
+    /// because it answers a different question: the breakdown is the window the
+    /// user paged to, this is all of the history there is, whatever they paged to.
+    /// Both read the same scanned events, so the two can never disagree.
+    func history(now: Date = Date(), calendar: Calendar = .current) -> UsageHistory? {
+        guard isAvailable else { return nil }
+        scan()
+        let usage = events.map { UsageEvent(date: $0.date, model: $0.model, totals: $0.totals) }
+        return UsageHistory.make(from: usage, now: now, calendar: calendar)
     }
 
     private func modelSplit(_ events: [Event]) -> [ModelTokens] {

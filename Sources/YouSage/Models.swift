@@ -311,6 +311,12 @@ struct TokenReport: Sendable, Equatable {
     /// reset time rather than inferred from local timestamps.
     let sessionIsAuthoritative: Bool
     let sessionCost: CostEstimate
+    /// Totals since local midnight. Not a slice of either window either side of
+    /// it: the session is a rolling five hours that can straddle midnight, and
+    /// the week is a rolling seven days — "today" is the one figure of the three
+    /// that lines up with the day the person thinks they have had.
+    let today: TokenTotals
+    let todayCost: CostEstimate
     let week: TokenTotals
     let weekStart: Date?
     let weekCost: CostEstimate
@@ -319,7 +325,7 @@ struct TokenReport: Sendable, Equatable {
     let filesScanned: Int
     let generatedAt: Date
 
-    var hasAnyData: Bool { !week.isEmpty || !session.isEmpty }
+    var hasAnyData: Bool { !week.isEmpty || !session.isEmpty || !today.isEmpty }
 }
 
 enum ClaudeError: Error, Sendable {

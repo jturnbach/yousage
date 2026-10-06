@@ -19,6 +19,10 @@ final class AppState: ObservableObject {
     @Published private(set) var tokenTrackingEnabled: Bool = true
     @Published private(set) var tokenReport: TokenReport?
     @Published private(set) var usageBreakdown: UsageBreakdown?
+    /// Every retained day, for the activity grid. Held apart from the breakdown
+    /// because it does not move with the range picker — paging the window back
+    /// re-buckets the charts above the grid, never the grid itself.
+    @Published private(set) var usageHistory: UsageHistory?
     /// Range the details window is showing. Not persisted: the design lands on 7D,
     /// and a window you opened yesterday on 90D should not silently cost you a
     /// 90-day rescan the next time you glance at it.
@@ -167,6 +171,7 @@ final class AppState: ObservableObject {
             // the other would leave a stale chart behind a switched-off feature.
             tokenReport = nil
             usageBreakdown = nil
+            usageHistory = nil
             // Re-enabling must show "reading…", not "nothing found".
             hasScannedTokens = false
         }
@@ -338,10 +343,15 @@ final class AppState: ObservableObject {
             // Same in-memory events, a different window. The second call re-enters
             // `scan()`, which is incremental and finds nothing new to read.
             let breakdown = await TokenTracker.shared.breakdown(range: range, offset: offset)
+            // A third pass over the same in-memory events, and the only one whose
+            // answer does not depend on the range — but it has to be re-read on
+            // every scan all the same, or today's cell would stop filling in.
+            let history = await TokenTracker.shared.history()
             await MainActor.run {
                 guard let self else { return }
                 self.tokenReport = report
                 self.usageBreakdown = breakdown
+                self.usageHistory = history
                 self.hasScannedTokens = true
                 self.lastTokenScan = Date()
                 self.tokenScan = nil

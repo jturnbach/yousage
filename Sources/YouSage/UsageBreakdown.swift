@@ -170,6 +170,17 @@ enum UsageRange: Int, Sendable, CaseIterable, Identifiable {
         }
     }
 
+    /// What the period before this one is called, for the onion skin's key and
+    /// its tooltip row. "Previous 7 days" would be wrong for the two calendar
+    /// ranges — last week is a week with a name, not a rolling seven days.
+    var previousName: String {
+        switch self {
+        case .today: return "Yesterday"
+        case .week:  return "Last week"
+        default:     return "Previous \(days) days"
+        }
+    }
+
     /// Whole periods of history behind the current window that the transcripts
     /// can still answer for. `TokenTracker` retains a day more than this, so the
     /// oldest bucket of the oldest window is always whole.
@@ -182,14 +193,26 @@ enum UsageRange: Int, Sendable, CaseIterable, Identifiable {
     var id: Int { rawValue }
 }
 
-/// The equal-length window immediately before the current one, for the trend
-/// chips. Every field is a total: the previous period is never charted, only
-/// compared against.
+/// The equal-length window immediately before the current one: the figures the
+/// trend chips compare against, and the shape the chart draws behind the current
+/// period as an onion skin.
 struct PeriodTotals: Sendable, Equatable {
+    /// Deliberately only as far as the current window has lived — half a week
+    /// against a whole one would invent a collapse in usage every Sunday. The
+    /// chips read this.
     let totals: TokenTotals
     let cost: CostEstimate
     /// nil when the window sent nothing to a model, matching `cacheHitRate`.
     let cacheHitRate: Double?
+    /// The *whole* previous window, bucketed exactly as the drawn one is and
+    /// aligned to it index for index — bucket i here is the same hour of
+    /// yesterday, or the same weekday of last week, as bucket i there.
+    ///
+    /// Unlike `totals` this is not truncated to what has been lived: at 2pm the
+    /// onion skin should carry on past the current line to where yesterday
+    /// actually finished, because that is the comparison a reader is making when
+    /// they look at a half-drawn day.
+    let buckets: [UsageBucket]
 }
 
 /// Where this calendar month is heading at the rate it has been going.
@@ -320,14 +343,8 @@ extension UsageBreakdown {
         let spanEnd = calendar.date(byAdding: range.unit == .hour ? .hour : .day,
                                     value: 1, to: bucketStarts.last ?? spanStart) ?? now
 
-        // Bucket once; every slice below reads from these two maps.
-        var perBucketModel: [Date: [String: TokenTotals]] = [:]
         var perModel: [String: TokenTotals] = [:]
         for e in events where e.date >= spanStart && e.date < spanEnd {
-            let bucket = bucketStart(of: e.date, unit: range.unit, calendar: calendar)
-            var models = perBucketModel[bucket] ?? [:]
-            models[e.model] = (models[e.model] ?? TokenTotals()) + e.totals
-            perBucketModel[bucket] = models
             perModel[e.model] = (perModel[e.model] ?? TokenTotals()) + e.totals
         }
 
@@ -335,39 +352,8 @@ extension UsageBreakdown {
         // whether it is that one. Outside the present window it matches nothing.
         let currentStart = offset == 0 ? bucketStart(of: now, unit: range.unit, calendar: calendar) : nil
 
-        let buckets: [UsageBucket] = bucketStarts.map { day in
-            let models = perBucketModel[day] ?? [:]
-
-            // Grouped by family but kept per model, so each family's dollars go
-            // through the same `estimate` the day and the window use — one
-            // pricing path, so the family lines can never sum to something other
-            // than the day's total.
-            var byFamilyMap: [ModelFamily: [String: TokenTotals]] = [:]
-            for (id, totals) in models {
-                let family = ModelFamily(modelID: id)
-                var inFamily = byFamilyMap[family] ?? [:]
-                inFamily[id] = (inFamily[id] ?? TokenTotals()) + totals
-                byFamilyMap[family] = inFamily
-            }
-            let byFamily = ModelFamily.allCases.compactMap { family -> FamilyTokens? in
-                guard let inFamily = byFamilyMap[family] else { return nil }
-                let totals = inFamily.values.reduce(TokenTotals()) { $0 + $1 }
-                guard !totals.isEmpty else { return nil }
-                return FamilyTokens(family: family,
-                                    totals: totals,
-                                    cost: estimate(over: inFamily))
-            }
-
-            // Not the last bucket: a day is drawn to midnight and a week to
-            // Saturday, so the bucket the clock is inside is usually somewhere in
-            // the middle. Nothing in a finished window is still accruing.
-            return UsageBucket(start: day,
-                               isCurrent: day == currentStart,
-                               isFuture: day > now,
-                               byFamily: byFamily,
-                               totals: byFamily.reduce(TokenTotals()) { $0 + $1.totals },
-                               cost: estimate(over: models))
-        }
+        let buckets = buckets(over: bucketStarts, from: events, unit: range.unit,
+                              calendar: calendar, now: now, currentStart: currentStart)
 
         let models: [ModelCost] = perModel.map { id, totals in
             ModelCost(model: id,
@@ -392,29 +378,97 @@ extension UsageBreakdown {
                               cost: estimate(over: perModel),
                               range: range,
                               offset: offset,
-                              previous: previousPeriod(in: events, before: spanStart,
+                              previous: previousPeriod(in: events, over: bucketStarts,
                                                        now: now, range: range, offset: offset,
                                                        calendar: calendar),
                               month: projectMonth(from: events, now: now, calendar: calendar),
                               generatedAt: now)
     }
 
-    /// The comparable window before the drawn one. Returns nil when it is empty,
-    /// so a chip never divides by zero and never claims an infinite rise off a
-    /// period we may simply never have scanned.
+    /// Every bucket of a window, oldest first, zero-filled — the one place events
+    /// become buckets. The drawn window and the onion skin behind it both come
+    /// through here, so the two can never be bucketed by different rules.
+    private static func buckets(over starts: [Date],
+                                from events: [UsageEvent],
+                                unit: BucketUnit,
+                                calendar: Calendar,
+                                now: Date,
+                                currentStart: Date?) -> [UsageBucket] {
+        guard let spanStart = starts.first, let spanLast = starts.last else { return [] }
+        // The end of the last bucket, not the end of the day: for `.today` the
+        // hours still to come are not part of the window, because they hold
+        // nothing and drawing them as zero would read as a collapse in usage.
+        let spanEnd = calendar.date(byAdding: unit == .hour ? .hour : .day,
+                                    value: 1, to: spanLast) ?? spanLast
+
+        var perBucketModel: [Date: [String: TokenTotals]] = [:]
+        for e in events where e.date >= spanStart && e.date < spanEnd {
+            let bucket = bucketStart(of: e.date, unit: unit, calendar: calendar)
+            var models = perBucketModel[bucket] ?? [:]
+            models[e.model] = (models[e.model] ?? TokenTotals()) + e.totals
+            perBucketModel[bucket] = models
+        }
+
+        return starts.map { start in
+            let models = perBucketModel[start] ?? [:]
+
+            // Grouped by family but kept per model, so each family's dollars go
+            // through the same `estimate` the day and the window use — one
+            // pricing path, so the family lines can never sum to something other
+            // than the day's total.
+            var byFamilyMap: [ModelFamily: [String: TokenTotals]] = [:]
+            for (id, totals) in models {
+                let family = ModelFamily(modelID: id)
+                var inFamily = byFamilyMap[family] ?? [:]
+                inFamily[id] = (inFamily[id] ?? TokenTotals()) + totals
+                byFamilyMap[family] = inFamily
+            }
+            let byFamily = ModelFamily.allCases.compactMap { family -> FamilyTokens? in
+                guard let inFamily = byFamilyMap[family] else { return nil }
+                let totals = inFamily.values.reduce(TokenTotals()) { $0 + $1 }
+                guard !totals.isEmpty else { return nil }
+                return FamilyTokens(family: family,
+                                    totals: totals,
+                                    cost: estimate(over: inFamily))
+            }
+
+            // Not the last bucket: a day is drawn to midnight and a week to
+            // Saturday, so the bucket the clock is inside is usually somewhere in
+            // the middle. Nothing in a finished window is still accruing, and
+            // nothing in the previous window is either — it is handed no current
+            // bucket at all.
+            return UsageBucket(start: start,
+                               isCurrent: start == currentStart,
+                               isFuture: start > now,
+                               byFamily: byFamily,
+                               totals: byFamily.reduce(TokenTotals()) { $0 + $1.totals },
+                               cost: estimate(over: models))
+        }
+    }
+
+    /// The comparable window before the drawn one. Returns nil when the whole of
+    /// it is empty, so the onion skin is absent rather than flat at zero, which
+    /// would read as "you used nothing last week" when the truth is "there is no
+    /// last week on this disk".
     ///
     /// For the daily ranges that is the equal-length window ending where the drawn
     /// one begins. For `.today` it is yesterday up to this time of day, not all of
     /// yesterday: a morning's usage measured against a whole finished day would
-    /// show a fall in usage every single morning.
+    /// show a fall in usage every single morning. Its *buckets* are the whole of
+    /// yesterday all the same — see `PeriodTotals.buckets`. The two can disagree:
+    /// at 9am with nothing run before 9am yesterday, `totals` is zero while the
+    /// buckets hold yesterday's afternoon. The chips read zero as "nothing to
+    /// compare against" — a change from zero is not a percentage — but the
+    /// overlay still has a shape to draw, and drawing it is its whole point.
     private static func previousPeriod(in events: [UsageEvent],
-                                       before spanStart: Date,
+                                       over currentStarts: [Date],
                                        now: Date,
                                        range: UsageRange,
                                        offset: Int,
                                        calendar: Calendar) -> PeriodTotals? {
         let days = range.unit == .hour ? 1 : range.days
-        guard let start = calendar.date(byAdding: .day, value: -days, to: spanStart) else {
+        guard let spanStart = currentStarts.first,
+              let start = calendar.date(byAdding: .day, value: -days, to: spanStart) else {
             return nil
         }
         // A finished window is compared against the whole window before it. One
@@ -430,12 +484,32 @@ extension UsageBreakdown {
         for e in events where e.date >= start && e.date < end {
             perModel[e.model] = (perModel[e.model] ?? TokenTotals()) + e.totals
         }
-        guard !perModel.isEmpty else { return nil }
+
+        // Shifted a whole period, bucket by bucket, so index i of the onion skin
+        // is the same hour of yesterday — or the same weekday of last week — as
+        // index i of the drawn window. Walked through the calendar rather than by
+        // seconds, so the comparison survives a DST boundary between the two.
+        let shifted = currentStarts.compactMap {
+            calendar.date(byAdding: .day, value: -days, to: $0)
+        }
+        // A shift the calendar could not answer for would misalign every later
+        // bucket, which is worse than drawing nothing.
+        let aligned = shifted.count == currentStarts.count
+            ? buckets(over: shifted, from: events, unit: range.unit,
+                      calendar: calendar, now: now, currentStart: nil)
+            : []
+
+        // Judged on the whole period, not the slice the chips read: a quiet
+        // morning must not erase the afternoon that followed it.
+        guard !perModel.isEmpty || aligned.contains(where: { $0.totals.total > 0 }) else {
+            return nil
+        }
 
         let totals = perModel.values.reduce(TokenTotals()) { $0 + $1 }
         return PeriodTotals(totals: totals,
                             cost: estimate(over: perModel),
-                            cacheHitRate: cacheHitRate(of: totals))
+                            cacheHitRate: cacheHitRate(of: totals),
+                            buckets: aligned)
     }
 
     /// Every bucket the window draws, oldest first. Never empty: a range is at
@@ -546,7 +620,11 @@ extension UsageBreakdown {
     /// Prices a model→totals map. A model the rate table cannot price contributes
     /// zero dollars and its id, so the figure renders as a lower bound rather than
     /// a confidently low number.
-    private static func estimate(over models: [String: TokenTotals]) -> CostEstimate {
+    ///
+    /// Internal rather than private because `UsageHistory` prices its days with
+    /// it: two pricing paths would be two answers to the same question, and the
+    /// grid's dollars have to agree with the chart's.
+    static func estimate(over models: [String: TokenTotals]) -> CostEstimate {
         var result = CostEstimate()
         var unpriced: Set<String> = []
         for (id, totals) in models {

@@ -263,6 +263,11 @@ struct TokenTrackerView: View {
                 totals: report.session,
                 cost: report.sessionCost)
 
+            row(title: "Today",
+                subtitle: nil,
+                totals: report.today,
+                cost: report.todayCost)
+
             row(title: "Last 7 days",
                 subtitle: nil,
                 totals: report.week,

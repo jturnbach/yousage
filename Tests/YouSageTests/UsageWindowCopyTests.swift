@@ -42,14 +42,6 @@ private func breakdown(_ range: UsageRange, offset: Int, events: [UsageEvent] = 
     #expect(UsageWindow.dateRange(breakdown(.week, offset: 1)).contains("–"))
 }
 
-@Test func anEmptyPagedBackWindowDoesNotClaimToBeTheCurrentOne() {
-    #expect(UsageWindow.emptyTitle(breakdown(.week, offset: 1)) == "No activity in this period")
-    #expect(UsageWindow.emptyTitle(breakdown(.today, offset: 1)) == "No activity in this period")
-    #expect(UsageWindow.emptyTitle(breakdown(.today, offset: 0)) == "No activity today yet")
-    #expect(UsageWindow.emptyTitle(breakdown(.week, offset: 0)) == "No activity this week")
-    #expect(UsageWindow.emptyTitle(breakdown(.month, offset: 0)) == "No activity in the last 30 days")
-}
-
 @Test func todayIsComparedToThisTimeYesterdayAndAPastDayToThePrecedingWholeOne() {
     // The comparison the model actually makes; the footnote is what tells the
     // reader which of the two it is looking at.
@@ -66,6 +58,15 @@ private func breakdown(_ range: UsageRange, offset: Int, events: [UsageEvent] = 
 
     let finished = breakdown(.week, offset: 1, events: [event(at(2026, 6, 25))])
     #expect(UsageWindow.previousTokens(finished).hasSuffix("the week before"))
+}
+
+@Test func aPreviousPeriodWithNothingYetToCompareStillReadsAsNoActivity() {
+    // Yesterday afternoon keeps the previous period alive for the overlay, but
+    // the chip's denominator is still zero and the footnote must say so rather
+    // than print "vs. 0".
+    let quiet = breakdown(.today, offset: 0, events: [event(at(2026, 7, 9, 10, 0)),
+                                                       event(at(2026, 7, 8, 20, 0))])
+    #expect(UsageWindow.previousTokens(quiet) == "no activity yesterday to this time")
 }
 
 @Test func aFinishedDayReportsItsWholeCountRatherThanWhatHasElapsed() {

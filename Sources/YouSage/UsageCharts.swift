@@ -45,6 +45,23 @@ enum TrendMetric: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The same measure over a whole calendar day, for the activity grid.
+    func value(_ day: DayUsage) -> Double {
+        switch self {
+        case .tokens: return Double(day.totals.total)
+        case .cost:   return day.cost.amount
+        }
+    }
+
+    /// The figure with its unit attached, for a tooltip that has no axis beside
+    /// it to say what "12.4M" counts.
+    func describe(_ value: Double) -> String {
+        switch self {
+        case .tokens: return "\(format(value)) tokens"
+        case .cost:   return format(value)
+        }
+    }
+
     /// Compact enough for an axis tick or a table cell.
     func format(_ value: Double) -> String {
         switch self {
@@ -71,18 +88,52 @@ struct TrendChart: View {
     /// Every bucket of the window, the not-yet-lived ones included: they are what
     /// holds the axis open to the whole day or week.
     let buckets: [UsageBucket]
+    /// The previous period, aligned to `buckets` index for index. Empty when the
+    /// onion skin is switched off, or when there is no previous period to draw.
+    var previous: [UsageBucket] = []
     let families: [ModelFamily]
     let metric: TrendMetric
     /// Day or hour. The chart draws the buckets it is handed either way; the unit
     /// only decides how the axis, the ticks, and the tooltip name them.
     let unit: BucketUnit
+    /// "Yesterday", "Last week" — what the overlay is, in the words the range
+    /// picker uses. The chart is handed it rather than deriving it, because only
+    /// the range knows whether seven days is a week or just seven days.
+    var previousName = "Previous"
     @Environment(\.colorScheme) private var scheme
     @State private var selectedDate: Date?
+    /// Where the pointer is vertically, in the chart's own coordinates. The
+    /// selection only carries an x, but the tooltip is pinned to the plot's
+    /// ceiling, so it takes a y to know when it is standing in front of what the
+    /// pointer came to look at.
+    @State private var hoverY: CGFloat?
+    /// Measured, because the tooltip's height is however many models ran in that
+    /// bucket — a guessed band would either fade too eagerly or too late.
+    @State private var tooltipHeight: CGFloat = 0
 
     /// What the lines are made of. An hour that has not happened is not an hour of
     /// zero usage, so it is not a vertex — the line stops at the present and the
     /// axis carries on without it.
     private var drawn: [UsageBucket] { buckets.filter { !$0.isFuture } }
+
+    /// The onion skin: last period's bucket plotted at this period's x. Drawn
+    /// across the *whole* window, the hours not yet lived included — at 2pm the
+    /// point of the overlay is seeing where yesterday went on to finish.
+    private var ghost: [(current: UsageBucket, previous: UsageBucket)] {
+        guard previous.count == buckets.count else { return [] }
+        return Array(zip(buckets, previous))
+    }
+
+    /// With two families on the chart there is no line for their sum, so the ghost
+    /// would hang above every drawn line and read as a collapse. Drawing the
+    /// current total gives it something to be compared against.
+    private var showsTotal: Bool { !ghost.isEmpty && families.count > 1 }
+
+    /// Every drawn bucket reads zero — a window nothing ran in, or one whose
+    /// models carry no list price under the cost metric. It is a real reading, so
+    /// it is drawn rather than replaced with a notice; the axis and the baseline
+    /// below are what keep it from looking like a chart that failed to load.
+    private var isIdle: Bool { drawn.allSatisfy { metric.total($0) == 0 } }
 
     /// Nearest drawn bucket to the hover, so the snap boundary is the midpoint
     /// between points rather than midnight — and so hovering the empty evening
@@ -118,6 +169,17 @@ struct TrendChart: View {
     private var fillOpacity: Double { families.count == 1 ? 0.32 : 0.18 }
 
     var body: some View {
+        // Left to itself an all-zero chart is scaled 0…1 and every tick rounds
+        // back to "0" — four identical labels down the axis. Pin the domain so
+        // the empty window reads as zero once, at the baseline where it belongs.
+        if isIdle {
+            chart.chartYScale(domain: 0...1)
+        } else {
+            chart
+        }
+    }
+
+    private var chart: some View {
         Chart {
             // `stacking: .unstacked` is load-bearing: area marks stack by default,
             // so two families would draw the second one's fill on top of the
@@ -153,6 +215,58 @@ struct TrendChart: View {
                     .foregroundStyle(color(family))
                     .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
                     .interpolationMethod(.linear)
+                }
+            }
+
+            // Nothing ran, so there is no family to plot and the lines above draw
+            // nothing at all. The zero is still a measurement: draw it as its own
+            // neutral baseline, uncoloured because it belongs to no model.
+            if families.isEmpty {
+                ForEach(drawn) { bucket in
+                    LineMark(
+                        x: .value(xLabel, bucket.start),
+                        y: .value(metric.label, 0),
+                        series: .value("Model", "idle")
+                    )
+                    .foregroundStyle(.tertiary)
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                }
+                if drawn.count == 1, let only = drawn.first {
+                    PointMark(x: .value(xLabel, only.start),
+                              y: .value(metric.label, 0))
+                        .symbolSize(64)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            // The onion skin, under everything: it is the backdrop the current
+            // period is read against, never a series in its own right. Dashed as
+            // well as dimmed, so it survives being printed, screenshotted, or
+            // looked at by someone who cannot tell the two greys apart.
+            ForEach(ghost, id: \.current.start) { pair in
+                LineMark(
+                    x: .value(xLabel, pair.current.start),
+                    y: .value(metric.label, metric.total(pair.previous)),
+                    series: .value("Model", "· previous")
+                )
+                .foregroundStyle(ChartPalette.ghost(scheme))
+                .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round,
+                                       lineJoin: .round, dash: [4, 3]))
+                .interpolationMethod(.linear)
+                .zIndex(-3)
+            }
+
+            if showsTotal {
+                ForEach(drawn) { bucket in
+                    LineMark(
+                        x: .value(xLabel, bucket.start),
+                        y: .value(metric.label, metric.total(bucket)),
+                        series: .value("Model", "· total")
+                    )
+                    .foregroundStyle(ChartPalette.totalLine(scheme))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                    .interpolationMethod(.linear)
+                    .zIndex(-3)
                 }
             }
 
@@ -222,18 +336,7 @@ struct TrendChart: View {
                 .foregroundStyle(.tertiary)
             }
         }
-        .chartYAxis {
-            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
-                AxisGridLine()   // solid hairline; never dashed
-                AxisValueLabel {
-                    if let amount = value.as(Double.self) {
-                        Text(metric.format(amount))
-                    }
-                }
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-            }
-        }
+        .chartYAxis { yAxis }
         // Glass is translucent, and the accent was validated for contrast against a
         // settled surface. Give the plot its own quiet backing so the wallpaper
         // behind the window cannot erode that.
@@ -250,17 +353,78 @@ struct TrendChart: View {
                     let plot = geo[anchor]
                     let centre = plot.minX + (proxy.position(forX: selected.start) ?? 0)
 
-                    BucketTooltip(bucket: selected, metric: metric, unit: unit)
+                    let top = plot.minY + 6
+                    // Reading the tooltip and reading the line under it are the
+                    // same gesture at the top of the plot, and the pane wins.
+                    // Yield to the pointer: fade almost out while it is inside
+                    // the band the pane covers, and come back on the way down.
+                    let inTheWay = hoverY.map { $0 < top + tooltipHeight + 8 } ?? false
+
+                    BucketTooltip(bucket: selected,
+                                  previous: previousBucket(for: selected),
+                                  previousName: previousName,
+                                  showsTotal: showsTotal,
+                                  metric: metric, unit: unit)
                         .frame(width: Self.tooltipWidth, alignment: .leading)
+                        .background {
+                            GeometryReader { tip in
+                                Color.clear
+                                    .task(id: tip.size.height) { tooltipHeight = tip.size.height }
+                            }
+                        }
+                        .opacity(inTheWay ? 0.12 : 1)
+                        .animation(.easeOut(duration: 0.12), value: inTheWay)
                         .offset(x: min(max(centre - Self.tooltipWidth / 2, plot.minX + 4),
                                        plot.maxX - Self.tooltipWidth - 4),
-                                y: plot.minY + 6)
+                                y: top)
                 }
             }
             // Never swallow the hover that produced the selection.
             .allowsHitTesting(false)
         }
+        .onContinuousHover(coordinateSpace: .local) { phase in
+            switch phase {
+            case .active(let point): hoverY = point.y
+            case .ended: hoverY = nil
+            }
+        }
         .frame(height: 206)
+    }
+
+    /// One tick on an idle window, four on a window with a range to divide.
+    @AxisContentBuilder
+    private var yAxis: some AxisContent {
+        if isIdle {
+            AxisMarks(position: .leading, values: [0.0]) { value in
+                AxisGridLine()   // solid hairline; never dashed
+                AxisValueLabel { yLabel(value) }
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        } else {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine()
+                AxisValueLabel { yLabel(value) }
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func yLabel(_ value: AxisValue) -> some View {
+        if let amount = value.as(Double.self) {
+            Text(metric.format(amount))
+        }
+    }
+
+    /// The bucket a period ago, found by position rather than by date: the two
+    /// windows are aligned by index precisely so that "the same hour yesterday"
+    /// survives a month of unequal length and a DST boundary between them.
+    private func previousBucket(for bucket: UsageBucket) -> UsageBucket? {
+        guard previous.count == buckets.count,
+              let index = buckets.firstIndex(where: { $0.start == bucket.start }) else { return nil }
+        return previous[index]
     }
 
     /// Weekdays read fastest over a week and dates over a month, but a day wants
@@ -290,8 +454,16 @@ struct TrendChart: View {
 /// one place that needs a tooltip. The lists below are direct-labelled.
 private struct BucketTooltip: View {
     let bucket: UsageBucket
+    /// The same bucket a period ago, when the onion skin is on. The line is where
+    /// the comparison is seen; this is where it is read exactly.
+    var previous: UsageBucket?
+    var previousName = "Previous"
+    /// Whether the chart is drawing the current total as a line of its own, so
+    /// the tooltip can name the same two series the chart does.
+    var showsTotal = false
     let metric: TrendMetric
     let unit: BucketUnit
+    @Environment(\.colorScheme) private var scheme
 
     /// An hour is named by its clock reading; a day by its weekday and date.
     private var title: Date.FormatStyle {
@@ -333,10 +505,52 @@ private struct BucketTooltip: View {
                         .foregroundStyle(.tertiary)
                 }
             }
+
+            if let previous {
+                Divider().padding(.vertical, 1)
+                if showsTotal {
+                    row(swatch: LineSwatch(color: ChartPalette.totalLine(scheme)),
+                        name: "Total",
+                        value: metric.format(metric.total(bucket)))
+                }
+                row(swatch: LineSwatch(color: ChartPalette.ghost(scheme), dashed: true),
+                    name: previousName,
+                    value: metric.format(metric.total(previous)))
+            }
         }
         .padding(EdgeInsets(top: 9, leading: 11, bottom: 9, trailing: 11))
         .glassSurface(cornerRadius: 10)
         .shadow(color: .black.opacity(0.28), radius: 12, y: 6)
+    }
+
+    private func row(swatch: LineSwatch, name: String, value: String) -> some View {
+        HStack(spacing: 5) {
+            swatch
+            Text(name)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(value)
+                .fontWeight(.medium)
+                .monospacedDigit()
+        }
+        .font(.system(size: 11))
+    }
+}
+
+/// A stroke of the series' own line, for legends and tooltips: the dash is what
+/// tells the onion skin from the current period, so the key has to carry it.
+struct LineSwatch: View {
+    let color: Color
+    var dashed = false
+
+    var body: some View {
+        Path { path in
+            path.move(to: CGPoint(x: 0, y: 1))
+            path.addLine(to: CGPoint(x: 13, y: 1))
+        }
+        .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round,
+                                          dash: dashed ? [3, 2.5] : []))
+        .frame(width: 13, height: 2)
     }
 }
 
@@ -344,6 +558,11 @@ private struct BucketTooltip: View {
 /// Present for every series, always — identity is never carried by colour alone.
 struct ModelLegend: View {
     let families: [ModelFamily]
+    /// Named for the period it draws — "vs. yesterday" beside a day of hours,
+    /// "vs. last week" beside a week of days. Empty when the overlay is off.
+    var previousName: String?
+    var showsTotal = false
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         HStack(spacing: 12) {
@@ -351,6 +570,18 @@ struct ModelLegend: View {
                 HStack(spacing: 5) {
                     ModelSwatch(family: family)
                     Text(family.displayName)
+                }
+            }
+            if showsTotal {
+                HStack(spacing: 5) {
+                    LineSwatch(color: ChartPalette.totalLine(scheme))
+                    Text("Total")
+                }
+            }
+            if let previousName {
+                HStack(spacing: 5) {
+                    LineSwatch(color: ChartPalette.ghost(scheme), dashed: true)
+                    Text(previousName)
                 }
             }
         }
@@ -377,6 +608,13 @@ struct CostByModelList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if models.isEmpty {
+                // The card keeps its place in the row: a window where no model ran
+                // has a cost breakdown, and its answer is nothing.
+                Text("No model ran in this period")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+            }
             ForEach(models) { model in
                 let share = totalCost > 0 ? model.cost.amount / totalCost : 0
                 VStack(alignment: .leading, spacing: 6) {
@@ -442,6 +680,11 @@ struct TokenKindList: View {
 /// numbers rather than approximate a line's height.
 struct UsageTable: View {
     let buckets: [UsageBucket]
+    /// The onion skin's numbers, aligned to `buckets` index for index. Empty when
+    /// the overlay is off — the table is the chart's twin, so it gains and loses
+    /// the column exactly when the chart gains and loses the line.
+    var previous: [UsageBucket] = []
+    var previousName = "Previous"
     let families: [ModelFamily]
     /// The table is the chart's twin, so it reads whichever metric the chart is
     /// drawing. Two views of one dataset disagreeing about their units would be
@@ -456,10 +699,19 @@ struct UsageTable: View {
             : .dateTime.weekday(.abbreviated).month(.abbreviated).day()
     }
 
+    /// Rows are drawn from `buckets`, which stops at the last lived bucket, so a
+    /// longer previous window simply goes unread rather than adding rows for
+    /// hours that have not happened.
+    private func previousCell(_ index: Int) -> Text? {
+        guard index < previous.count else { return nil }
+        return Text(metric.format(metric.total(previous[index])))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             row(bucket: Text(unit == .hour ? "Hour" : "Day"),
-                cells: families.map { Text($0.displayName) },
+                cells: families.map { Text($0.displayName) }
+                    + (previous.isEmpty ? [] : [Text(previousName)]),
                 total: Text("Total"))
                 .font(.system(size: 11, weight: .semibold))
                 .textCase(.uppercase)
@@ -468,12 +720,12 @@ struct UsageTable: View {
                 .padding(.bottom, 8)
             Divider()
 
-            ForEach(buckets) { bucket in
+            ForEach(Array(buckets.enumerated()), id: \.element.id) { index, bucket in
                 row(bucket: Text(bucket.start, format: rowFormat)
                         .fontWeight(.medium),
                     cells: families.map { family in
                         Text(cell(family, in: bucket)).foregroundStyle(.secondary)
-                    },
+                    } + (previousCell(index).map { [$0.foregroundStyle(.tertiary)] } ?? []),
                     total: Text(metric.format(metric.total(bucket))).fontWeight(.semibold))
                     .font(.system(size: 12))
                     .monospacedDigit()

@@ -629,3 +629,90 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
     #expect(b.daysElapsed == 7)
     #expect(b.messagesPerDay == 2)
 }
+
+// MARK: - Onion skin
+
+@Test func theOnionSkinHasExactlyOneBucketPerDrawnBucket() {
+    // Index alignment is the whole mechanism: the overlay is plotted at the
+    // current period's x values, so a count that drifts would draw last Tuesday
+    // over this Wednesday.
+    // One event inside each range's previous window: yesterday for the hourly
+    // range, last week, the 30 days before these 30, the 90 before these 90.
+    let events = [event(at(2026, 7, 9, 9), "claude-opus-4-8"),
+                  event(at(2026, 7, 8, 9), "claude-opus-4-8"),
+                  event(at(2026, 7, 1, 9), "claude-opus-4-8"),
+                  event(at(2026, 5, 20, 9), "claude-opus-4-8"),
+                  event(at(2026, 2, 20, 9), "claude-opus-4-8")]
+    for range in [UsageRange.today, .week, .month, .quarter] {
+        let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 14), calendar: cal, range: range)
+        #expect(b.previous?.buckets.count == b.buckets.count)
+    }
+}
+
+@Test func eachOnionBucketIsTheSameSlotOnePeriodEarlier() {
+    let events = [event(at(2026, 7, 9, 9), "claude-opus-4-8"),
+                  event(at(2026, 7, 1, 9), "claude-opus-4-8")]
+    let week = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 14), calendar: cal)
+    for (current, previous) in zip(week.buckets, week.previous?.buckets ?? []) {
+        #expect(previous.start == cal.date(byAdding: .day, value: -7, to: current.start))
+    }
+
+    let today = UsageBreakdown.make(from: [event(at(2026, 7, 9, 9), "claude-opus-4-8"),
+                                           event(at(2026, 7, 8, 9), "claude-opus-4-8")],
+                                    now: at(2026, 7, 9, 14), calendar: cal, range: .today)
+    for (current, previous) in zip(today.buckets, today.previous?.buckets ?? []) {
+        #expect(previous.start == cal.date(byAdding: .day, value: -1, to: current.start))
+    }
+}
+
+@Test func theOnionSkinDrawsTheWholePreviousPeriodThoughItsTotalsStopWhereOursDo() {
+    // Jul 3 is inside last week but past the point this week has reached. The
+    // chip must not count it — comparing a half week against a whole one invents
+    // a collapse — but the overlay must draw it, because seeing where last week
+    // went on to finish is the entire reason for an overlay.
+    let events = [event(at(2026, 7, 9), "claude-opus-4-8", input: 500),
+                  event(at(2026, 6, 30), "claude-opus-4-8", input: 300),
+                  event(at(2026, 7, 3), "claude-opus-4-8", input: 900)]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
+    #expect(b.previous?.totals.total == 300)
+    let drawn = (b.previous?.buckets ?? []).reduce(0) { $0 + $1.totals.total }
+    #expect(drawn == 1_200)
+}
+
+@Test func nothingInTheOnionSkinIsCurrentOrYetToHappen() {
+    let events = [event(at(2026, 7, 9), "claude-opus-4-8"), event(at(2026, 7, 1), "claude-opus-4-8")]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal)
+    let previous = b.previous?.buckets ?? []
+    #expect(!previous.isEmpty)
+    #expect(previous.allSatisfy { !$0.isCurrent && !$0.isFuture })
+}
+
+@Test func theOnionSkinKeepsItsPlacesAcrossASpringForward() {
+    // Mar 8 2026 loses an hour. The day before it has 24 hours and the day
+    // itself 23, so a shift measured in seconds would slide every hour of the
+    // overlay one column left.
+    let events = [event(at(2026, 3, 8, 10), "claude-opus-4-8"),
+                  event(at(2026, 3, 7, 10), "claude-opus-4-8")]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 3, 8, 20), calendar: cal, range: .today)
+    let previous = b.previous?.buckets ?? []
+    #expect(previous.count == b.buckets.count)
+    // The hour that holds 10am today is matched with the hour that held 10am
+    // yesterday, whatever the clocks did in between.
+    let index = b.buckets.firstIndex { cal.component(.hour, from: $0.start) == 10 }
+    #expect(index != nil)
+    #expect(previous[index!].totals.total == 1_000)
+}
+
+@Test func aQuietMorningDoesNotHideAnAfternoonYesterdayFromTheOnionSkin() {
+    // At 9am with nothing run before 9am yesterday, the chips have nothing to
+    // compare against — but yesterday's afternoon happened, and the overlay
+    // exists to show it. The previous period must survive with empty totals
+    // rather than vanish along with its buckets.
+    let events = [event(at(2026, 7, 9, 8), "claude-opus-4-8", input: 500),
+                  event(at(2026, 7, 8, 15), "claude-opus-4-8", input: 900)]
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9, 9), calendar: cal, range: .today)
+    #expect(b.previous?.totals.total == 0)
+    #expect(b.tokenChange == nil)
+    let drawn = (b.previous?.buckets ?? []).reduce(0) { $0 + $1.totals.total }
+    #expect(drawn == 900)
+}

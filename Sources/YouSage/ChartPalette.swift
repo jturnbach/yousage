@@ -43,6 +43,44 @@ enum ChartPalette {
     static func sequential(_ scheme: ColorScheme) -> Color {
         Color(hex: sequentialHex(scheme))
     }
+
+    /// The onion skin's ink. Deliberately not a model colour: the previous period
+    /// is not a model, and borrowing one would make last week's Opus look like
+    /// this week's. Muted, because it is context for the current line rather than
+    /// a rival to it.
+    static func ghost(_ scheme: ColorScheme) -> Color {
+        Color(nsColor: .secondaryLabelColor).opacity(scheme == .dark ? 0.8 : 0.65)
+    }
+
+    /// The current period's own total, drawn only when the window holds more than
+    /// one family — with one, the family line already *is* the total, and a second
+    /// line on top of it would be a duplicate the reader has to rule out.
+    static func totalLine(_ scheme: ColorScheme) -> Color {
+        Color(nsColor: .labelColor).opacity(scheme == .dark ? 0.55 : 0.45)
+    }
+
+    /// The activity grid's ramp: one hue, four steps of ink, plus the empty cell.
+    /// Stepped in OKLCH so the four are evenly spaced to the eye rather than
+    /// evenly spaced in sRGB, which would bunch the two darkest together.
+    ///
+    /// Light mode runs the way the request reads and the way ink behaves on
+    /// paper: pale orange for a quiet day, dark brown for a heavy one. Dark mode
+    /// cannot run the same direction — a brown cell on a near-black card is the
+    /// *least* visible thing on the page, so the busiest day would recede exactly
+    /// where it should shout. It runs dim-to-luminous instead, which keeps the
+    /// thing the ramp actually encodes: more ink, more usage.
+    static func heat(level: Int, scheme: ColorScheme) -> Color {
+        let dark = scheme == .dark
+        switch max(0, min(level, 4)) {
+        case 1:  return dark ? Color(oklch: 0.340, 0.050, 46) : Color(oklch: 0.925, 0.045, 62)
+        case 2:  return dark ? Color(oklch: 0.450, 0.085, 46) : Color(oklch: 0.845, 0.085, 56)
+        case 3:  return dark ? Color(oklch: 0.565, 0.110, 46) : Color(oklch: 0.735, 0.125, 48)
+        case 4:  return dark ? Color(oklch: 0.685, 0.130, 48) : Color(oklch: 0.545, 0.115, 40)
+        // A day with nothing on it is still a day, so it keeps a cell — held just
+        // above the card so the grid reads as a grid, never as scattered marks.
+        default: return Color.primary.opacity(dark ? 0.085 : 0.06)
+        }
+    }
 }
 
 extension Color {

@@ -58,19 +58,19 @@ extension UsageHistory {
         let starts: [Date] = (0..<max(span, 1)).reversed().compactMap {
             calendar.date(byAdding: .day, value: -$0, to: today)
         }
-        let first = starts.first ?? today
+        guard let first = starts.first else { return UsageHistory(days: [], generatedAt: now) }
         let end = calendar.date(byAdding: .day, value: 1, to: today) ?? now
 
-        var perDayModel: [Date: [String: TokenTotals]] = [:]
+        // Bucketed against the walked midnights, like the breakdown's buckets,
+        // rather than one calendar call per event.
+        var perDayModel = [[String: TokenTotals]](repeating: [:], count: starts.count)
         for e in events where e.date >= first && e.date < end {
-            let day = calendar.startOfDay(for: e.date)
-            var models = perDayModel[day] ?? [:]
-            models[e.model] = (models[e.model] ?? TokenTotals()) + e.totals
-            perDayModel[day] = models
+            let day = UsageBreakdown.bucketIndex(of: e.date, in: starts)
+            perDayModel[day][e.model] = (perDayModel[day][e.model] ?? TokenTotals()) + e.totals
         }
 
-        let days = starts.map { day -> DayUsage in
-            let models = perDayModel[day] ?? [:]
+        let days = starts.enumerated().map { index, day -> DayUsage in
+            let models = perDayModel[index]
             return DayUsage(start: day,
                             totals: models.values.reduce(TokenTotals()) { $0 + $1 },
                             cost: UsageBreakdown.estimate(over: models))

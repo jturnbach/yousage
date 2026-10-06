@@ -446,16 +446,14 @@ extension UsageBreakdown {
         let spanEnd = calendar.date(byAdding: unit == .hour ? .hour : .day,
                                     value: 1, to: spanLast) ?? spanLast
 
-        var perBucketModel: [Date: [String: TokenTotals]] = [:]
+        var perBucketModel = [[String: TokenTotals]](repeating: [:], count: starts.count)
         for e in events where e.date >= spanStart && e.date < spanEnd {
-            let bucket = bucketStart(of: e.date, unit: unit, calendar: calendar)
-            var models = perBucketModel[bucket] ?? [:]
-            models[e.model] = (models[e.model] ?? TokenTotals()) + e.totals
-            perBucketModel[bucket] = models
+            let bucket = bucketIndex(of: e.date, in: starts)
+            perBucketModel[bucket][e.model] = (perBucketModel[bucket][e.model] ?? TokenTotals()) + e.totals
         }
 
-        return starts.map { start in
-            let models = perBucketModel[start] ?? [:]
+        return starts.enumerated().map { index, start in
+            let models = perBucketModel[index]
 
             // Grouped by family but kept per model, so each family's dollars go
             // through the same `estimate` the day and the window use — one
@@ -606,8 +604,24 @@ extension UsageBreakdown {
         }
     }
 
-    /// The bucket an event belongs to. The one place a date becomes a bucket key,
+    /// The bucket an event belongs to: the last of `starts` at or before `date`,
+    /// which must not be before the first. The one place a date becomes a bucket,
     /// so the buckets drawn and the events counted can never disagree.
+    ///
+    /// The starts were already walked through the calendar, so they *are* the
+    /// boundaries; a search over them gives the bucket `startOfDay` would, without
+    /// asking the calendar once per event — with a remote source's months of
+    /// events, those calendar calls were most of the cost of a range switch.
+    static func bucketIndex(of date: Date, in starts: [Date]) -> Int {
+        var low = 0, high = starts.count - 1
+        while low < high {
+            let mid = (low + high + 1) / 2
+            if starts[mid] <= date { low = mid } else { high = mid - 1 }
+        }
+        return low
+    }
+
+    /// The bucket the clock is inside.
     private static func bucketStart(of date: Date,
                                     unit: BucketUnit,
                                     calendar: Calendar) -> Date {

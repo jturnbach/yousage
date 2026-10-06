@@ -66,6 +66,28 @@ private func event(_ date: Date, _ model: String, input: Int = 1_000) -> UsageEv
     #expect(day(b, at(2026, 7, 9))!.totals.total == 1_000)
 }
 
+@Test func sourcesAreSplitOnlyOnceARemoteSourceIsNamed() {
+    var remote = event(at(2026, 7, 8), "claude-opus-4-8", input: 500)
+    remote.source = "tserver.ts.net"
+    var tooOld = event(at(2026, 7, 4), "claude-opus-4-8")   // last week — out
+    tooOld.source = "tserver.ts.net"
+    let events = [event(at(2026, 7, 9), "claude-opus-4-8"), remote, tooOld]
+
+    #expect(UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal).sources.isEmpty)
+
+    let b = UsageBreakdown.make(from: events, now: at(2026, 7, 9), calendar: cal,
+                                sourceNames: ["tserver.ts.net": "TServer", "a.ts.net": "Alpha"])
+    #expect(b.sources.map(\.name) == ["This Mac", "Alpha", "TServer"])
+    #expect(b.sources.map(\.id) == ["local", "a.ts.net", "tserver.ts.net"])
+    #expect(b.sources[0].isLocal)
+    #expect(b.sources[0].totals.total == 1_000)
+    #expect(b.sources[1].totals.total == 0)
+    #expect(b.sources[2].totals.total == 500)
+    // The split is of the same span as everything else, so it sums to it.
+    #expect(b.totals.total == 1_500)
+    #expect(abs(b.sources.map(\.cost.amount).reduce(0, +) - b.cost.amount) < 1e-9)
+}
+
 @Test func eventsOutsideTheSpanAreExcluded() {
     let events = [
         event(at(2026, 7, 4), "claude-opus-4-8"),   // Saturday, last week — out

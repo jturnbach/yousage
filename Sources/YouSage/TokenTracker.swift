@@ -141,9 +141,12 @@ actor TokenTracker {
                    now: Date = Date(),
                    calendar: Calendar = .current) -> UsageBreakdown? {
         guard let events = currentEvents() else { return nil }
-        let usage = events.map { UsageEvent(date: $0.date, model: $0.model, totals: $0.totals) }
+        let usage = events.map {
+            UsageEvent(date: $0.date, model: $0.model, totals: $0.totals, source: $0.source)
+        }
         return UsageBreakdown.make(from: usage, now: now, calendar: calendar,
-                                   range: range, offset: offset)
+                                   range: range, offset: offset,
+                                   sourceNames: remote.mapValues(\.name))
     }
 
     /// Every retained day, for the activity grid. Separate from `breakdown`

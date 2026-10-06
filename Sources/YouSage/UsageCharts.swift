@@ -674,6 +674,47 @@ struct TokenKindList: View {
     }
 }
 
+/// Where the tokens were spent once a remote source counts: this Mac and each
+/// server. One measure, so one hue, as in `TokenKindList`; the icon, not a
+/// colour, says which row is which.
+struct SourceList: View {
+    let sources: [SourceCost]
+    @Environment(\.colorScheme) private var scheme
+
+    private var largest: Int { max(sources.map(\.totals.total).max() ?? 0, 1) }
+
+    var body: some View {
+        VStack(spacing: 11) {
+            ForEach(sources) { source in
+                HStack(spacing: 12) {
+                    HStack(spacing: 6) {
+                        Image(systemName: source.isLocal ? "laptopcomputer" : "server.rack")
+                            .frame(width: 16)
+                        Text(source.name)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 130, alignment: .leading)
+                    Meter(fraction: Double(source.totals.total) / Double(largest),
+                          fill: ChartPalette.accent(scheme),
+                          height: 8)
+                    Text(NumberFormat.tokens(source.totals.total))
+                        .font(.system(size: 12, weight: .medium))
+                        .monospacedDigit()
+                        .frame(width: 56, alignment: .trailing)
+                    Text(source.cost.exactDisplay)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .frame(width: 76, alignment: .trailing)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Table
 
 /// The accessible twin the chart is supposed to have, and the place to read exact

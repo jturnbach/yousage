@@ -147,6 +147,14 @@ struct UsageWindow: View {
                              padding: EdgeInsets(top: 15, leading: 18, bottom: 15, trailing: 18)) {
                         TokenKindList(kinds: breakdown.kinds)
                     }
+                    // This Mac vs each remote source; only once one is attached,
+                    // as in the popover.
+                    if breakdown.sources.count > 1 {
+                        DashCard(title: "By machine",
+                                 padding: EdgeInsets(top: 15, leading: 18, bottom: 15, trailing: 18)) {
+                            SourceList(sources: breakdown.sources)
+                        }
+                    }
                     if let history = state.usageHistory {
                         historyCard(history)
                     }

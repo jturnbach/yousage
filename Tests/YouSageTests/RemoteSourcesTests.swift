@@ -55,6 +55,39 @@ private func transcriptRoot(_ turns: [(id: String, minutesAgo: Double)]) throws 
     #expect(report.sessionCost.isComplete)
 }
 
+@Test func remoteEventsReachTheBreakdownAndTheHistory() async throws {
+    let root = try transcriptRoot([("local-1", 10)])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let tracker = TokenTracker(root: root)
+
+    // A lone Mac: no split in the details window either.
+    #expect(try #require(await tracker.breakdown()).sources.isEmpty)
+
+    await tracker.mergeRemote(source: "tserver.example.ts.net", name: "TServer",
+                              events: [remoteEvent("r1", minutesAgo: 20),
+                                       remoteEvent("r2", minutesAgo: 40 * 24 * 60)],
+                              replace: true)
+
+    // The activity grid spans 180 days, so it holds all three wherever the
+    // calendar boundaries fall today.
+    let history = try #require(await tracker.history())
+    #expect(history.totals.messages == 3)
+
+    // Whatever span the quarter covers today, the split adds up to it.
+    let breakdown = try #require(await tracker.breakdown(range: .quarter))
+    #expect(breakdown.sources.map(\.name) == ["This Mac", "TServer"])
+    #expect(breakdown.sources.map(\.totals.messages).reduce(0, +) == breakdown.totals.messages)
+}
+
+@Test func aRemoteOnlyMacStillHasABreakdownAndAHistory() async throws {
+    let tracker = TokenTracker(root: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
+    #expect(await tracker.breakdown() == nil)
+    #expect(await tracker.history() == nil)
+    await tracker.mergeRemote(source: "s", name: "S", events: [remoteEvent("a", minutesAgo: 5)], replace: true)
+    #expect(try #require(await tracker.history()).totals.messages == 1)
+    #expect(try #require(await tracker.breakdown()).sources.map(\.name) == ["This Mac", "S"])
+}
+
 @Test func anEventSeenLocallyIsNotCountedAgainFromARemote() async throws {
     let root = try transcriptRoot([("shared", 10)])
     defer { try? FileManager.default.removeItem(at: root) }

@@ -6,6 +6,8 @@ struct UsageEvent: Sendable, Equatable {
     let date: Date
     let model: String
     let totals: TokenTotals
+    /// nil for this Mac's own transcripts, else the remote source's id.
+    var source: String? = nil
 }
 
 /// The colour-bearing identity of a model. Versions fold together: Opus 4.7 and
@@ -119,6 +121,16 @@ struct ModelCost: Sendable, Equatable, Identifiable {
     let totals: TokenTotals
     let cost: CostEstimate
     var id: String { model }
+}
+
+/// One machine's share of a window: this Mac, or a remote source.
+struct SourceCost: Sendable, Equatable, Identifiable {
+    /// "local" for this Mac, else the remote source's id — as `SourceTokens`.
+    let id: String
+    let name: String
+    let isLocal: Bool
+    let totals: TokenTotals
+    let cost: CostEstimate
 }
 
 struct KindTotal: Sendable, Equatable, Identifiable {
@@ -261,6 +273,9 @@ struct UsageBreakdown: Sendable, Equatable {
     let previous: PeriodTotals?
     let month: MonthProjection
     let generatedAt: Date
+    /// This Mac, then each remote source by name, over the same span. Empty
+    /// when no remote source is attached, so a lone Mac shows no split.
+    var sources: [SourceCost] = []
 
     /// Cache reads as a share of everything sent *to* the model. Output tokens are
     /// generated, never read from a cache, so they are not in the denominator.
@@ -333,7 +348,8 @@ extension UsageBreakdown {
                      now: Date,
                      calendar: Calendar,
                      range: UsageRange = .week,
-                     offset: Int = 0) -> UsageBreakdown {
+                     offset: Int = 0,
+                     sourceNames: [String: String] = [:]) -> UsageBreakdown {
         let offset = max(0, offset)
         let bucketStarts = bucketStarts(for: range, now: now, calendar: calendar, offset: offset)
         let spanStart = bucketStarts[0]
@@ -382,7 +398,36 @@ extension UsageBreakdown {
                                                        now: now, range: range, offset: offset,
                                                        calendar: calendar),
                               month: projectMonth(from: events, now: now, calendar: calendar),
-                              generatedAt: now)
+                              generatedAt: now,
+                              sources: sources(in: events, from: spanStart, to: spanEnd,
+                                               names: sourceNames))
+    }
+
+    /// This Mac first, then each remote source in `names` (id → name) by name —
+    /// the popover's order. Every attached source gets a row, idle or not.
+    private static func sources(in events: [UsageEvent],
+                                from start: Date,
+                                to end: Date,
+                                names: [String: String]) -> [SourceCost] {
+        guard !names.isEmpty else { return [] }
+        var perSource: [String?: [String: TokenTotals]] = [:]
+        for e in events where e.date >= start && e.date < end {
+            var models = perSource[e.source] ?? [:]
+            models[e.model] = (models[e.model] ?? TokenTotals()) + e.totals
+            perSource[e.source] = models
+        }
+        func row(_ source: String?, name: String) -> SourceCost {
+            let models = perSource[source] ?? [:]
+            return SourceCost(id: source ?? "local",
+                              name: name,
+                              isLocal: source == nil,
+                              totals: models.values.reduce(TokenTotals()) { $0 + $1 },
+                              cost: estimate(over: models))
+        }
+        let remotes = names.sorted {
+            $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending
+        }
+        return [row(nil, name: "This Mac")] + remotes.map { row($0.key, name: $0.value) }
     }
 
     /// Every bucket of a window, oldest first, zero-filled — the one place events

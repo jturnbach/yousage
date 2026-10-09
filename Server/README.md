@@ -79,6 +79,21 @@ No setup on the Mac. The app runs `tailscale status --json`, takes online peers
 tagged `tag:server`, and probes `https://<peer>/yousage/v1/usage`. Whatever
 answers with this payload becomes a source. See the main README.
 
+## Plan limits CLI (`yousage-limits`)
+
+`yousage_limits.py`, installed by `install.sh` as `/usr/local/bin/yousage-limits`,
+prints this machine's Claude plan limits (session, weekly, per-model) with
+reset times, read from Claude Code's own `/usage` (no model call; cached 60 s):
+
+```
+$ yousage-limits
+session 7% (resets 12:59) · week 64% (resets 16:59) · fable week 0%
+$ yousage-limits --json
+```
+
+It never reads Claude Code's credentials. The source and its limits are
+described in [docs/limits-source.md](../docs/limits-source.md).
+
 ## Tests
 
 ```bash

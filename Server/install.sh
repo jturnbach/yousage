@@ -13,6 +13,8 @@ fi
 install -d -m 0755 /usr/local/lib/yousage-server
 install -m 0644 yousage_server.py /usr/local/lib/yousage-server/yousage_server.py
 install -m 0644 yousage-server.service /etc/systemd/system/yousage-server.service
+# Local plan-limits CLI (runs as the calling user; see docs/limits-source.md).
+install -m 0755 yousage_limits.py /usr/local/bin/yousage-limits
 
 systemctl daemon-reload
 systemctl enable yousage-server.service

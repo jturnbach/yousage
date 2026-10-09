@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"00000000-0000-0000-0000-000000000000"}
+{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You are using an API key"}]},"local_command_run":{"command":"usage","args":""},"usage_report":{"session":{"total_cost_usd":0},"rate_limits":null}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":0,"local_command":"usage","result":"You are using an API key"}
